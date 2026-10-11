@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Packaging and build output
+build/
+dist/
+*.spec.bak
+*.manifest
+*.exe
+*.msi
+
+# Local application data, databases and logs (never commit user data)
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+settings.json
+history*.json
+.smart-file-organizer/
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key

@@ -1,0 +1,2 @@
+# Runtime dependencies, pinned for reproducible installs. Python 3.12+.
+customtkinter==6.0.0

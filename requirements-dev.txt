@@ -1,0 +1,5 @@
+# Development and build tools. Install with: pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+pytest==9.1.1
+ruff==0.17.0
+pyinstaller==6.22.3

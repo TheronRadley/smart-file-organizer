@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-file-organizer"
+version = "0.1.0.dev0"
+description = "Safe, previewable file organization, duplicate detection and undo for the desktop."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "TheronRadley" }]
+keywords = ["file organizer", "duplicates", "desktop", "customtkinter", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: MacOS X",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+dependencies = ["customtkinter>=5.2,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "pyinstaller>=6"]
+
+[project.scripts]
+smart-file-organizer = "smart_file_organizer.main:main"
+
+[project.urls]
+Repository = "https://github.com/TheronRadley/smart-file-organizer"
+Issues = "https://github.com/TheronRadley/smart-file-organizer/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF100"]
+ignore = ["SIM108", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM117"]
