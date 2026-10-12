@@ -179,10 +179,12 @@ def test_source_replaced_by_different_file_is_refused(
 ) -> None:
     source = make_file(workspace / "swap.pdf", b"AAAA", mtime=1_700_000_000)
     plan = _plan(workspace, options, classifier)
+    assert plan.operations[0].file_id is not None
     replacement = make_file(workspace / "replacement.tmp", b"BBBB", mtime=1_700_000_000)
     os.replace(replacement, source)  # same size and timestamp, different file object
     outcome = execute_plan(plan, history=history)
     assert outcome.success_count == 0
+    assert "replaced by a different file" in outcome.outcomes[0].reason
     assert source.read_bytes() == b"BBBB"
 
 
@@ -277,3 +279,57 @@ def test_hidden_files_are_not_moved_by_default(
     make_file(workspace / ".env")
     plan = _plan(workspace, options, classifier)
     assert plan.operations == ()
+
+
+def test_move_no_overwrite_refuses_occupied_destination(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+
+    from smart_file_organizer.core import fileops
+
+    source = make_file(workspace / "source.txt", b"source-bytes")
+    destination = make_file(workspace / "dest.txt", b"existing-bytes")
+    with pytest.raises(FileExistsError):
+        fileops.move_no_overwrite(source, destination)
+    assert source.read_bytes() == b"source-bytes"
+    assert destination.read_bytes() == b"existing-bytes"
+
+    def no_hard_links(src: Path, dst: Path) -> None:
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    monkeypatch.setattr(fileops.os, "link", no_hard_links)
+    with pytest.raises(FileExistsError):
+        fileops.move_no_overwrite(source, destination)
+    assert source.read_bytes() == b"source-bytes"
+    assert destination.read_bytes() == b"existing-bytes"
+
+
+def test_move_no_overwrite_fails_closed_on_posix_without_hard_links(
+    workspace: Path,
+    options: ScanOptions,
+    classifier: Classifier,
+    history: HistoryRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import errno
+
+    from smart_file_organizer.core import fileops
+
+    source = make_file(workspace / "report.pdf", b"important-data")
+    plan = _plan(workspace, options, classifier)
+
+    def no_hard_links(src: Path, dst: Path) -> None:
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    def forbidden_rename(src: Path, dst: Path) -> None:
+        raise AssertionError("os.rename must not be called as a POSIX fallback")
+
+    monkeypatch.setattr(fileops.os, "name", "posix")
+    monkeypatch.setattr(fileops.os, "link", no_hard_links)
+    monkeypatch.setattr(fileops.os, "rename", forbidden_rename)
+
+    outcome = execute_plan(plan, history=history)
+    assert outcome.success_count == 0
+    assert outcome.failed_count == 1
+    assert "hard links unavailable" in outcome.outcomes[0].reason
+    assert source.read_bytes() == b"important-data"
+    assert not (workspace / "Documents" / "report.pdf").exists()

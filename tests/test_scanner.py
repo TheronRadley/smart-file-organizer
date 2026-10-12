@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from smart_file_organizer.core.models import ScanOptions
-from smart_file_organizer.core.scanner import ScanError, scan_folder
+from smart_file_organizer.core.scanner import ScanError, file_identity, scan_folder
 
 from .conftest import is_root_user, make_file, symlinks_supported
 
@@ -141,3 +141,27 @@ def test_progress_callback_is_called(workspace: Path, options: ScanOptions) -> N
     calls = []
     scan_folder(workspace, options, progress=calls.append)
     assert calls and calls[-1].files_seen == 1
+
+
+def test_hard_links_share_scanned_file_identity(workspace: Path, options: ScanOptions) -> None:
+    first = make_file(workspace / "first.txt", b"shared")
+    second = workspace / "second.txt"
+    try:
+        os.link(first, second)
+    except OSError:
+        pytest.skip("Hard links are not supported here")
+    entries = {entry.name: entry for entry in scan_folder(workspace, options).entries}
+    assert entries["first.txt"].file_id is not None
+    assert entries["first.txt"].file_id == entries["second.txt"].file_id
+
+
+def test_file_identity_recovers_when_stat_has_zero_inode(workspace: Path) -> None:
+    target = make_file(workspace / "doc.txt", b"hello")
+    real_stats = os.lstat(target)
+    raw = list(real_stats)
+    raw[1] = 0  # st_ino = 0, matching os.DirEntry.stat() on Windows
+    raw[2] = 0  # st_dev = 0
+    zero_ino_stats = os.stat_result(raw)
+    assert file_identity(zero_ino_stats) is None
+    assert file_identity(zero_ino_stats, target) is not None
+    assert file_identity(zero_ino_stats, target) == file_identity(real_stats, target)

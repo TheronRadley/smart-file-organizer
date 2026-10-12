@@ -12,9 +12,10 @@ what it does not, and what to do when something goes wrong.
 2. **Dry runs change nothing.** A dry run performs the same validation as a real run,
    creates no folders, moves no files and writes no history.
 3. **Existing files are never overwritten.** Each move is created as a new hard link and
-   only then is the original removed. Creating a link fails if the destination exists. On
-   file systems without hard links, the fallback checks for the destination first and then
-   renames; a small race window exists there (see *Limitations*).
+   only then is the original removed. Creating a link fails atomically if the destination
+   exists. When hard links are unavailable, Windows uses its non-replacing rename primitive,
+   while POSIX fails closed and leaves the source untouched rather than risking an overwrite
+   (see *Limitations*).
 4. **Collisions are resolved by a rule you choose.** The default renames the incoming file to
    `name (2).ext`, `name (3).ext`, and so on. The alternative skips the file and reports it.
 5. **Sources are re-checked immediately before each move.** The file must still exist, be a
@@ -54,11 +55,13 @@ what it does not, and what to do when something goes wrong.
   and each file is independently recorded.
 - **Classification is by extension only.** A file named `invoice.jpg` that is really a PDF
   is classified as an image. The tool does not inspect contents to decide.
-- **Hard-link fallback race.** On volumes without hard-link support (for example some FAT32,
-  exFAT or network shares), a move falls back to a rename after an existence check. Another
-  program creating the same name in the instant between the check and the rename could be
-  overwritten on POSIX systems. On NTFS, which Windows PCs normally use, the hard-link path is
-  used and this race does not arise.
+- **Filesystems without hard-link or file-ID support.** On POSIX volumes that do not support
+  hard links (for example some FAT32, exFAT or network mounts), `move_no_overwrite` refuses
+  the move and leaves the source in place rather than falling back to `os.rename`, which on
+  POSIX could overwrite a file created concurrently. On Windows volumes without hard links,
+  `os.rename` is used because the Win32 rename call fails if the destination exists. Similarly,
+  if a filesystem provides no non-zero file identifier via `os.lstat` or an open file handle,
+  replacement checks fall back to comparing file size and modification timestamp.
 - **Undo is not a time machine.** It reverses moves only. It does not restore files you edited,
   renamed or deleted afterwards, and it refuses rather than guessing.
 - **Monitoring is polling-based.** Changes are picked up within the configured interval

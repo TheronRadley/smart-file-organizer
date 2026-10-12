@@ -47,7 +47,7 @@ WATCHER_RUNNING = "running"
 WATCHER_PAUSED = "paused"
 MAX_EVENTS = 200
 
-FileKey = tuple[str, int, int]
+FileKey = tuple[str, int, int, str | None]
 Clock = Callable[[], float]
 
 
@@ -89,7 +89,7 @@ class _WatchState:
 
 
 def _key(operation: PlannedOperation) -> FileKey:
-    return (str(operation.source), operation.size, operation.modified_ns)
+    return (str(operation.source), operation.size, operation.modified_ns, operation.file_id)
 
 
 class FolderWatcher:

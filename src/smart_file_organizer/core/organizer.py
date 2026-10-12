@@ -238,7 +238,7 @@ def check_source(operation: PlannedOperation, root: Path) -> str | None:
         return "Source is not a regular file (link or special file)"
     if stats.st_size != operation.size or stats.st_mtime_ns != operation.modified_ns:
         return "Source changed after the preview was built; rescan before organizing"
-    if operation.file_id is not None and file_identity(stats) != operation.file_id:
+    if operation.file_id is not None and file_identity(stats, operation.source) != operation.file_id:
         return "Source was replaced by a different file after the preview was built"
     return None
 

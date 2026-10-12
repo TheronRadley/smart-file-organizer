@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from pathlib import Path
 
@@ -122,14 +123,62 @@ def test_scan_summaries_round_trip(history: HistoryRepository, tmp_path: Path) -
 
 def test_corrupt_database_is_preserved_and_replaced(tmp_path: Path) -> None:
     path = tmp_path / "history.sqlite3"
-    path.write_bytes(b"this is definitely not an sqlite database" * 100)
+    corrupt_bytes = b"this is definitely not an sqlite database" * 100
+    path.write_bytes(corrupt_bytes)
     database, backup = open_database(path)
     try:
         assert backup is not None and backup.exists()
-        assert backup.read_bytes().startswith(b"this is definitely")
+        assert backup.read_bytes() == corrupt_bytes
         assert database.integrity_ok()
     finally:
         database.close()
+
+    # A second recovery in the same folder must use a unique backup name and preserve both.
+    second_corrupt = b"second damaged database payload" * 80
+    path.write_bytes(second_corrupt)
+    database2, backup2 = open_database(path)
+    try:
+        assert backup2 is not None and backup2.exists()
+        assert backup2 != backup
+        assert backup.read_bytes() == corrupt_bytes
+        assert backup2.read_bytes() == second_corrupt
+        assert database2.integrity_ok()
+    finally:
+        database2.close()
+
+
+def test_corrupt_database_with_wal_and_shm_companions_recovers_cleanly(tmp_path: Path) -> None:
+    path = tmp_path / "history.sqlite3"
+    wal = Path(f"{path}-wal")
+    shm = Path(f"{path}-shm")
+    path.write_bytes(b"corrupt main db" * 50)
+    wal.write_bytes(b"corrupt wal companion" * 20)
+    shm.write_bytes(b"corrupt shm companion" * 20)
+
+    database, backup = open_database(path)
+    try:
+        assert backup is not None and backup.exists()
+        assert backup.read_bytes() == b"corrupt main db" * 50
+        assert Path(f"{backup}-wal").read_bytes() == b"corrupt wal companion" * 20
+        assert Path(f"{backup}-shm").read_bytes() == b"corrupt shm companion" * 20
+        assert database.integrity_ok()
+    finally:
+        database.close()
+
+
+def test_failed_database_init_closes_connection_and_reraises(tmp_path: Path) -> None:
+    path = tmp_path / "future.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 10}")
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="newer than this application supports"):
+        Database(path)
+
+    # On Windows, renaming an open SQLite file fails with PermissionError (WinError 32).
+    renamed = tmp_path / "future-renamed.sqlite3"
+    os.replace(path, renamed)
+    assert renamed.exists()
 
 
 def test_healthy_database_is_opened_without_recovery(tmp_path: Path) -> None:
