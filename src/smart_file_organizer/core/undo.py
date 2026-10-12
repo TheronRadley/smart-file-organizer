@@ -133,7 +133,7 @@ def _check_move(operation: OperationRecord, root: Path) -> UndoItem:
         return blocked("The file was modified after it was organized")
     if operation.modified_ns is not None and stats.st_mtime_ns != operation.modified_ns:
         return blocked("The file was modified after it was organized")
-    if operation.file_id is not None and file_identity(stats) != operation.file_id:
+    if operation.file_id is not None and file_identity(stats, current) != operation.file_id:
         return blocked("The organized location now holds a different file")
     if os.path.lexists(original):
         return blocked("The original location is occupied by another file")

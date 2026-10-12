@@ -82,6 +82,10 @@ def test_undo_refuses_when_destination_was_replaced(
     os.replace(replacement, workspace / "Documents" / "swap.pdf")
     preview = preview_undo(batch_id, history)
     assert preview.blocked and "different file" in preview.blocked[0].reason
+    with pytest.raises(UndoError, match="different file"):
+        undo_batch(batch_id, history)
+    assert (workspace / "Documents" / "swap.pdf").read_bytes() == b"BBBB"
+    assert not (workspace / "swap.pdf").exists()
 
 
 def test_undo_reports_missing_destination(

@@ -195,10 +195,10 @@ def hash_file(entry: FileEntry, limit: int | None = None) -> str:
             if remaining is not None:
                 remaining -= len(chunk)
     after = os.lstat(entry.path)
-    if (after.st_size, after.st_mtime_ns, file_identity(after)) != (
+    if (after.st_size, after.st_mtime_ns, file_identity(after, entry.path)) != (
         before.st_size,
         before.st_mtime_ns,
-        file_identity(before),
+        file_identity(before, entry.path),
     ):
         raise _ChangedDuringScan()
     return digest.hexdigest()

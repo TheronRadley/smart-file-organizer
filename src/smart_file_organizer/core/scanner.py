@@ -6,6 +6,7 @@ that every directory it descends into still resolves inside the selected root.
 
 from __future__ import annotations
 
+import ctypes
 import fnmatch
 import logging
 import os
@@ -167,13 +168,96 @@ def _make_entry(path: Path, relative: str, name: str, stats: os.stat_result, cla
         size=stats.st_size,
         modified_ns=stats.st_mtime_ns,
         created_ts=creation,
-        file_id=file_identity(stats),
+        file_id=file_identity(stats, path),
         category=classifier.category_for_name(name),
     )
 
 
-def file_identity(stats: os.stat_result) -> str | None:
-    """Stable identifier for a file's storage object, used to detect replacement."""
-    if not stats.st_ino:
+def file_identity(stats: os.stat_result, path: Path | str | None = None) -> str | None:
+    """Stable identifier for a file's storage object, used to detect replacement.
+
+    On POSIX and on Windows ``os.lstat()`` results, ``st_dev`` and ``st_ino``
+    identify the underlying file object. On Windows, ``os.DirEntry.stat()``
+    populates its result from ``WIN32_FIND_DATA`` where ``st_ino`` is zero; when
+    ``path`` is supplied, this function queries ``os.lstat(path)`` (and, if
+    needed on Windows, ``GetFileInformationByHandle``) so hard links and file
+    replacements are still detected reliably. Returns ``None`` only when the
+    underlying filesystem genuinely provides no file identifier.
+    """
+    if stats.st_ino:
+        return f"{stats.st_dev}:{stats.st_ino}"
+    if path is None:
         return None
-    return f"{stats.st_dev}:{stats.st_ino}"
+    try:
+        full_stats = os.lstat(path)
+    except OSError:
+        full_stats = None
+    if full_stats is not None and full_stats.st_ino:
+        return f"{full_stats.st_dev}:{full_stats.st_ino}"
+    if os.name == "nt":
+        return _windows_handle_identity(path)
+    return None
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", ctypes.c_uint32),
+        ("ftCreationTimeLow", ctypes.c_uint32),
+        ("ftCreationTimeHigh", ctypes.c_uint32),
+        ("ftLastAccessTimeLow", ctypes.c_uint32),
+        ("ftLastAccessTimeHigh", ctypes.c_uint32),
+        ("ftLastWriteTimeLow", ctypes.c_uint32),
+        ("ftLastWriteTimeHigh", ctypes.c_uint32),
+        ("dwVolumeSerialNumber", ctypes.c_uint32),
+        ("nFileSizeHigh", ctypes.c_uint32),
+        ("nFileSizeLow", ctypes.c_uint32),
+        ("nNumberOfLinks", ctypes.c_uint32),
+        ("nFileIndexHigh", ctypes.c_uint32),
+        ("nFileIndexLow", ctypes.c_uint32),
+    ]
+
+
+def _windows_handle_identity(path: Path | str) -> str | None:
+    """Read volume serial number and 64-bit file index from a Win32 file handle."""
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return None
+    kernel32 = windll.kernel32
+    share_all = 0x00000001 | 0x00000002 | 0x00000004
+    open_existing = 3
+    flags = 0x02000000 | 0x00200000  # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ByHandleFileInformation)]
+    get_info.restype = ctypes.c_int
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    invalid_handle = ctypes.c_void_p(-1).value
+    handle = create_file(os.fspath(path), 0, share_all, None, open_existing, flags, None)
+    if handle is None or handle == invalid_handle:
+        return None
+    try:
+        info = _ByHandleFileInformation()
+        if not get_info(handle, ctypes.byref(info)):
+            return None
+        file_index = (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow)
+        if not file_index:
+            return None
+        return f"{int(info.dwVolumeSerialNumber)}:{file_index}"
+    finally:
+        close_handle(handle)

@@ -270,16 +270,22 @@ class AutomationPage(BasePage):
         ):
             return
 
-        def work(task: TaskContext) -> int:
-            moved = 0
+        def work(task: TaskContext) -> tuple[int, int, int]:
+            moved = skipped = failed = 0
             for watcher in watchers:
                 outcome = watcher.apply_pending()
                 if outcome is not None:
                     moved += outcome.success_count
-            return moved
+                    skipped += outcome.skipped_count
+                    failed += outcome.failed_count
+            return moved, skipped, failed
 
-        def success(moved: int) -> None:
-            self.notify(f"Moved {moved} waiting file(s).")
+        def success(counts: tuple[int, int, int]) -> None:
+            moved, skipped, failed = counts
+            if failed or skipped:
+                self.notify(f"Waiting files processed: {moved} moved, {skipped} skipped, {failed} failed.")
+            else:
+                self.notify(f"Moved {moved} waiting file(s).")
             self.refresh()
 
         self.runner.submit(

@@ -31,3 +31,14 @@ aims to follow [Semantic Versioning](https://semver.org/) once it has its first 
 - Persistent settings in the per-user data folder, with light and dark themes.
 - pytest test suite, Ruff configuration, GitHub Actions workflows for tests and a Windows build.
 - Documentation: README, user guide, safety guide, architecture notes, contributing guide.
+
+### Fixed
+- Resolved Windows file identity detection (`file_identity`) when `os.DirEntry.stat()` reports
+  `st_ino == 0` by querying `os.lstat()` and Win32 handle information so hard-link deduplication,
+  source replacement checks and guarded undo work reliably on Windows.
+- Closed leaked SQLite connections when `Database` initialization, migration or integrity checks
+  fail, preventing `PermissionError` (`WinError 32`) during corrupt-database recovery on Windows
+  and preserving corrupt databases (and `-wal`/`-shm` companions) under unique backup names.
+- Removed the unsafe POSIX check-then-rename fallback in `move_no_overwrite`, failing closed
+  with a clear error when hard links are unavailable on POSIX so existing destination files can
+  never be overwritten concurrently.

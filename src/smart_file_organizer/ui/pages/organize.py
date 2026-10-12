@@ -396,12 +396,19 @@ class OrganizePage(BasePage):
 
         def success(outcome: BatchOutcome) -> None:
             self._set_busy(False)
-            self._show_outcome(
-                plan,
-                outcome,
-                f"Batch finished: {outcome.success_count} moved, "
-                f"{outcome.skipped_count} skipped, {outcome.failed_count} failed.",
+            if outcome.cancelled:
+                prefix = "Batch cancelled"
+            elif outcome.failed_count:
+                prefix = "Batch partially applied"
+            else:
+                prefix = "Batch finished"
+            headline = (
+                f"{prefix}: {outcome.success_count} moved, "
+                f"{outcome.skipped_count} skipped, {outcome.failed_count} failed."
             )
+            self._show_outcome(plan, outcome, headline)
+            if outcome.cancelled or outcome.failed_count:
+                self._banner.show(headline, color=theme.WARNING)
             self.ctx.last_plan = None
             if outcome.success_count and self.ctx.last_scan is not None:
                 # Rescan so the file list reflects the new locations.
