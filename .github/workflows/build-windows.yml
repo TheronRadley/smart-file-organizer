@@ -1,0 +1,42 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Build executable
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name SmartFileOrganizer
+          --paths src --collect-all customtkinter app.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartFileOrganizer-windows
+          path: dist/SmartFileOrganizer/
+          if-no-files-found: error
