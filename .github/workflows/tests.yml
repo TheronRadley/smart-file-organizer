@@ -37,5 +37,34 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Check formatting
+        run: ruff format --check .
+
       - name: Test
         run: python -m pytest -q
+
+      # The unit tests never import tkinter, so a broken window would only show
+      # up here. Windows runners have a desktop session, so a skip is a failure:
+      # SFO_REQUIRE_GUI makes the test fail instead of skipping.
+      - name: GUI startup smoke test
+        if: matrix.os == 'windows-latest'
+        env:
+          SFO_REQUIRE_GUI: "1"
+        run: python -m pytest tests/test_startup_smoke.py -v -rs
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit==2.10.1
+
+      - name: Check pinned dependencies for known vulnerabilities
+        run: pip-audit -r requirements.txt -r requirements-dev.txt --strict

@@ -16,22 +16,32 @@ what it does not, and what to do when something goes wrong.
    exists. When hard links are unavailable, Windows uses its non-replacing rename primitive,
    while POSIX fails closed and leaves the source untouched rather than risking an overwrite
    (see *Limitations*).
-4. **Collisions are resolved by a rule you choose.** The default renames the incoming file to
+4. **A failed move never deletes a file it did not create.** If the original cannot be
+   removed after the link was created, the extra link is removed again — but only after it
+   has been proved, by device and inode, to still be the link this operation created *and*
+   to still refer to the same file object as the source. If another program replaced that
+   path in the meantime, or the filesystem reports no file identifier, the copy is kept and
+   the failure reports both paths. An extra link is recoverable; a file another program just
+   wrote is not.
+5. **Collisions are resolved by a rule you choose.** The default renames the incoming file to
    `name (2).ext`, `name (3).ext`, and so on. The alternative skips the file and reports it.
-5. **Sources are re-checked immediately before each move.** The file must still exist, be a
+6. **Sources are re-checked immediately before each move.** The file must still exist, be a
    regular file (not a link), have the same size and modification time, and carry the same
-   file identity as when the preview was built. Otherwise it is skipped and reported.
-6. **Destinations stay inside the selected folder.** Destination folders are plain names
+   file identity as when the preview was built. Otherwise it is skipped and reported. The
+   check runs again after the destination folder has been created, and the move itself
+   refuses a source that is no longer a regular file or no longer carries the recorded
+   identity, so a path swapped between check and use cannot be followed.
+7. **Destinations stay inside the selected folder.** Destination folders are plain names
    validated against Windows reserved names and invalid characters. Path containment is
    checked after resolving links.
-7. **Symbolic links and junctions are never followed.** They are counted and skipped during
+8. **Symbolic links and junctions are never followed.** They are counted and skipped during
    scans, so the tool cannot be led outside the folder you selected.
-8. **Organized folders are not re-sorted.** Files already inside a destination folder are
+9. **Organized folders are not re-sorted.** Files already inside a destination folder are
    not moved again, so recursive scans do not churn your sorted tree.
-9. **Every outcome is recorded.** Each move, skip and failure is written to the history
+10. **Every outcome is recorded.** Each move, skip and failure is written to the history
    database with its reason, and each batch has a final status (`completed`, `partial`,
    `cancelled`, or `interrupted` after a crash).
-10. **Undo is guarded.** A batch is reversed only when every outstanding move can be reversed
+11. **Undo is guarded.** A batch is reversed only when every outstanding move can be reversed
     safely. The checks are:
     - the organized file still exists, is a regular file, and has the recorded size,
       modification time and file identity;
@@ -40,12 +50,12 @@ what it does not, and what to do when something goes wrong.
 
     If any check fails, **nothing is moved** and the reasons are listed. Undo also removes
     folders that the batch created, but only if they are empty.
-11. **Duplicates are reported, never deleted.** Two files are duplicates only if their SHA-256
+12. **Duplicates are reported, never deleted.** Two files are duplicates only if their SHA-256
     digests match. Files that change while being read are excluded, and hard links to one
     file are not counted as recoverable space.
-12. **Least privilege.** The application never requests administrator rights and never runs
+13. **Least privilege.** The application never requests administrator rights and never runs
     shell commands built from file names.
-13. **Privacy.** No network access, no telemetry, no cloud services and no reading of file
+14. **Privacy.** No network access, no telemetry, no cloud services and no reading of file
     contents for classification (see the README privacy statement).
 
 ## Limitations
@@ -83,8 +93,17 @@ occupies the original path), then try again.
 **The application closed during a batch.** On the next start, the batch is marked `interrupted`,
 and any operation that was still in progress is marked `interrupted` with the message
 "Application stopped before this operation finished; check the file locations manually."
-Look at the source and destination of those files in *History*, and move them back by hand if
-needed. Operations that had already finished are unaffected.
+Open *History*, select the batch, and press **Recovery guidance…**: it checks where the file
+actually is now and states the safe next step for each one —
+- at the original location only: the move never happened, nothing was lost;
+- at the new location only: the move finished but was not recorded, so Undo cannot reverse it;
+- at both: the interrupted move left two copies, and both paths are named so you can compare
+  and delete one yourself (neither is deleted for you);
+- at neither: another program moved, renamed or deleted it, and you should locate it before
+  running anything else.
+
+Operations that had already finished are unaffected. Guidance is also shown automatically
+when you select a batch that ended `running`, `interrupted`, `partial` or `cancelled`.
 
 **The history database is damaged.** It is renamed to `history.corrupt-<timestamp>.sqlite3`
 in the data folder and a new history is started. The corrupt copy is kept so it can be
@@ -92,7 +111,11 @@ inspected. Your organized files are not affected. Undo is not available for batc
 in the damaged copy.
 
 **I want to stop monitoring.** Press *Stop* on the Automation page, or remove the folder from
-the list. Closing the application also stops monitoring.
+the list. Closing the application also stops monitoring. Stop is immediate: the request
+reaches the scan and the move batch, so a poll already in progress moves nothing further.
+If the folder is large and the current check has not finished, the status shows *Stopping*
+for a moment; while it does, starting again is refused rather than running a second watcher,
+and the status becomes *Stopped* on its own once the check has finished.
 
 ## Reporting a safety problem
 

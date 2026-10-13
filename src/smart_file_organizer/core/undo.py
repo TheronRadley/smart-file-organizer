@@ -15,7 +15,7 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from smart_file_organizer.core.fileops import move_no_overwrite
+from smart_file_organizer.core.fileops import MoveRollbackError, move_no_overwrite
 from smart_file_organizer.core.history import HistoryRepository
 from smart_file_organizer.core.models import (
     BATCH_ORGANIZE,
@@ -173,10 +173,28 @@ def undo_batch(batch_id: str, history: HistoryRepository) -> UndoResult:
             continue
         try:
             item.original.parent.mkdir(parents=True, exist_ok=True)
-            move_no_overwrite(item.current, item.original)
         except OSError as exc:
             failed += 1
             reason = describe_os_error(exc)
+            history.set_undo_result(item.operation.id, UNDO_FAILED, reason)
+            messages.append(f"Could not recreate the original folder for {item.current.name}: {reason}")
+            continue
+
+        # Recreating folders can take arbitrarily long, so the move is re-checked
+        # immediately before it happens rather than relying on the earlier pass.
+        final_check = _check_move(item.operation, Path(preview.batch.root_path))
+        if final_check.status == UNDO_STATUS_BLOCKED:
+            skipped += 1
+            messages.append(f"Skipped {item.current.name}: {final_check.reason}")
+            continue
+        try:
+            move_no_overwrite(item.current, item.original, expected_identity=item.operation.file_id)
+        except OSError as exc:
+            failed += 1
+            reason = describe_os_error(exc)
+            if isinstance(exc, MoveRollbackError):
+                # Nothing was lost, but an extra copy was kept: say so, and how to resolve it.
+                reason = f"{reason}. {exc.recovery}"
             history.set_undo_result(item.operation.id, UNDO_FAILED, reason)
             messages.append(f"Could not restore {item.current.name}: {reason}")
             continue

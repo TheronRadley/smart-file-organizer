@@ -11,6 +11,28 @@ def choose_folder(parent: Any, title: str = "Choose a folder") -> str:
     return filedialog.askdirectory(parent=parent, title=title, mustexist=True) or ""
 
 
+EXPORT_FILETYPES: tuple[tuple[str, str], ...] = (
+    ("CSV (spreadsheet)", "*.csv"),
+    ("JSON", "*.json"),
+)
+
+
+def choose_save_path(
+    parent: Any, title: str, default_name: str, filetypes: tuple[tuple[str, str], ...] = EXPORT_FILETYPES
+) -> str:
+    """Native save-as picker for reports. Returns an empty string when cancelled."""
+    return (
+        filedialog.asksaveasfilename(
+            parent=parent,
+            title=title,
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=list(filetypes),
+        )
+        or ""
+    )
+
+
 def confirm(parent: Any, title: str, message: str) -> bool:
     return bool(messagebox.askyesno(title, message, icon="warning", parent=parent))
 

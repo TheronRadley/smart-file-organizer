@@ -11,6 +11,7 @@ from smart_file_organizer.core.duplicates import (
     DuplicateReport,
     find_duplicates,
 )
+from smart_file_organizer.core.export import ExportError, duplicates_export, write_export
 from smart_file_organizer.core.models import ScanOptions
 from smart_file_organizer.ui import theme
 from smart_file_organizer.ui.components import dialogs
@@ -77,6 +78,7 @@ class DuplicatesPage(BasePage):
         button(toolbar, "Open file location", self._open_location, width=170).pack(side="left")
         button(toolbar, "Mark / unmark for review", self._toggle_review, width=200).pack(side="left", padx=8)
         button(toolbar, "Copy review list", self._copy_review_list, width=150).pack(side="left")
+        button(toolbar, "Export report…", self._export, width=140).pack(side="left", padx=8)
         self._review_label = muted_label(toolbar, "")
         self._review_label.pack(side="right")
         self._table = FileTable(
@@ -193,6 +195,21 @@ class DuplicatesPage(BasePage):
         if item is None:
             dialogs.info(self, "Select a file", "Select a file row (not a group heading).")
         return item
+
+    def _export(self) -> None:
+        report = self.ctx.last_duplicates
+        if report is None:
+            dialogs.info(self, "Nothing to export", "Run a duplicate search first.")
+            return
+        path = dialogs.choose_save_path(self, "Export duplicate report", "duplicates.csv")
+        if not path:
+            return
+        try:
+            written = write_export(duplicates_export(report), path)
+        except ExportError as exc:
+            dialogs.error(self, "Could not export", str(exc))
+            return
+        self.notify(f"Duplicate report exported to {written}")
 
     def _open_location(self) -> None:
         duplicate = self._selected_file()

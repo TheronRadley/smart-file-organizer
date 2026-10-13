@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 
+from smart_file_organizer.core.fileops import open_read_no_follow
 from smart_file_organizer.core.models import FileEntry, ScanIssue, ScanOptions
 from smart_file_organizer.core.scanner import (
     describe_os_error,
@@ -178,14 +179,20 @@ def _hash_or_none(entry: FileEntry, limit: int | None, issues: list[ScanIssue]) 
 def hash_file(entry: FileEntry, limit: int | None = None) -> str:
     """SHA-256 of the first ``limit`` bytes (or the whole file when ``limit`` is None).
 
-    Raises ``_ChangedDuringScan`` if the file's metadata changes during reading.
+    The file is opened without following a symbolic link and read through that
+    handle, so a link swapped in after the scan cannot redirect the read to a
+    different file. The handle is compared with the size, timestamp and
+    identity the scanner recorded, and again once reading finished, so a file
+    that changed is excluded rather than reported with stale data.
+
+    Raises ``_ChangedDuringScan`` if this is not the file that was scanned.
     """
-    before = os.lstat(entry.path)
-    if not stat.S_ISREG(before.st_mode):
-        raise _ChangedDuringScan()
-    digest = hashlib.sha256()
-    remaining = limit
-    with open(entry.path, "rb") as handle:
+    handle, stats = open_read_no_follow(entry.path)
+    with handle:
+        if not stat.S_ISREG(stats.st_mode) or not _matches_scan(stats, entry):
+            raise _ChangedDuringScan()
+        digest = hashlib.sha256()
+        remaining = limit
         while remaining is None or remaining > 0:
             request = READ_CHUNK_BYTES if remaining is None else min(READ_CHUNK_BYTES, remaining)
             chunk = handle.read(request)
@@ -194,11 +201,14 @@ def hash_file(entry: FileEntry, limit: int | None = None) -> str:
             digest.update(chunk)
             if remaining is not None:
                 remaining -= len(chunk)
-    after = os.lstat(entry.path)
-    if (after.st_size, after.st_mtime_ns, file_identity(after, entry.path)) != (
-        before.st_size,
-        before.st_mtime_ns,
-        file_identity(before, entry.path),
-    ):
+        after = os.fstat(handle.fileno())
+    if not _matches_scan(after, entry):
         raise _ChangedDuringScan()
     return digest.hexdigest()
+
+
+def _matches_scan(stats: os.stat_result, entry: FileEntry) -> bool:
+    """True when ``stats`` still describes the file the scanner recorded."""
+    if stats.st_size != entry.size or stats.st_mtime_ns != entry.modified_ns:
+        return False
+    return entry.file_id is None or file_identity(stats, entry.path) == entry.file_id

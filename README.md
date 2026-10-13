@@ -32,7 +32,10 @@ _Screenshots have not been captured yet._
   explicit opt-in. Waits until files stop changing, handles each file once, and supports pause,
   resume and stop.
 - **History** — every real operation is recorded with its outcome and reason (dry runs are not).
-  Clearing history never touches your files.
+  Clearing history never touches your files. Batches that did not finish cleanly come with
+  **recovery guidance**: where the file is now, and the safest next step.
+- **Reports** — export history, scan results and duplicate reports to CSV (UTF-8 with BOM, so
+  spreadsheets read non-ASCII paths) or JSON, for auditing and for keeping a record off the machine.
 - **Dashboard** — shows real results from your scans and history.
 - **Settings** — collision rule, organization method, category folder names, exclusions, extension
   overrides, watch options, dark (default) or light theme.
@@ -76,6 +79,11 @@ ruff format --check .
 ```
 
 The tests use temporary folders only. They never read or write your real files or settings.
+
+CI also runs a GUI startup smoke test on Windows (the unit tests never import tkinter) and
+audits the pinned dependencies for known vulnerabilities with `pip-audit`. Manual Windows
+checks that cannot be automated are listed in
+[docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md).
 
 ## Build a Windows executable
 

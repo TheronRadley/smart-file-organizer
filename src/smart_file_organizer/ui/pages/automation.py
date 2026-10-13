@@ -10,6 +10,7 @@ from smart_file_organizer.core.models import ScanOptions
 from smart_file_organizer.core.watcher import (
     WATCHER_PAUSED,
     WATCHER_RUNNING,
+    WATCHER_STOPPING,
     FolderWatcher,
     WatchConfig,
 )
@@ -23,6 +24,9 @@ from smart_file_organizer.utils.formatting import format_size
 
 APPLY_PENDING_KEY = "watch-apply"
 REFRESH_MS = 1000
+# Stopping must not freeze the window: the status flips to Stopped on its own
+# once the current check has finished, and the page refreshes every second.
+UI_STOP_TIMEOUT = 0.5
 STABLE_SECONDS = 10.0
 
 
@@ -181,7 +185,7 @@ class AutomationPage(BasePage):
         if folder is None:
             dialogs.info(self, "Select a folder", "Select a folder in the list first.")
             return
-        self.ctx.watches.remove(Path(folder))
+        self.ctx.watches.remove(Path(folder), UI_STOP_TIMEOUT)
         self.ctx.settings.watch_folders = [f for f in self.ctx.settings.watch_folders if f != folder]
         self.ctx.save_settings()
         self.refresh()
@@ -255,8 +259,11 @@ class AutomationPage(BasePage):
 
     def _stop(self) -> None:
         for watcher in self.ctx.watches.watchers():
-            watcher.stop()
-        self.notify("Monitoring stopped.")
+            watcher.stop(UI_STOP_TIMEOUT)
+        stopping = any(watcher.status == WATCHER_STOPPING for watcher in self.ctx.watches.watchers())
+        self.notify(
+            "Finishing the current check; no further files will be moved." if stopping else "Monitoring stopped."
+        )
         self.refresh()
 
     def _apply_pending(self) -> None:
@@ -304,5 +311,6 @@ def _describe_status(status: str) -> str:
     return {
         WATCHER_RUNNING: "Running",
         WATCHER_PAUSED: "Paused",
+        WATCHER_STOPPING: "Stopping",
         "stopped": "Stopped",
     }.get(status, status.title())

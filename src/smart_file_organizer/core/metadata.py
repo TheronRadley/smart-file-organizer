@@ -6,10 +6,12 @@ No other file content is parsed.
 
 from __future__ import annotations
 
+import stat
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 
+from smart_file_organizer.core.fileops import open_read_no_follow
 from smart_file_organizer.core.models import FileEntry
 
 _HEADER_READ_LIMIT = 512 * 1024
@@ -44,9 +46,20 @@ def read_metadata(entry: FileEntry) -> FileMetadata:
 
 
 def image_dimensions(path: Path) -> tuple[int, int] | None:
-    """Return (width, height) from an image header, or None if unknown or unreadable."""
+    """Return (width, height) from an image header, or None if unknown or unreadable.
+
+    The file is opened without following a symbolic link and the handle is
+    checked to be a regular file, so a link swapped in after the scan cannot
+    make this read some other file.
+    """
     try:
-        with open(path, "rb") as handle:
+        handle, stats = open_read_no_follow(path)
+    except OSError:
+        return None
+    try:
+        with handle:
+            if not stat.S_ISREG(stats.st_mode):
+                return None
             data = handle.read(_HEADER_READ_LIMIT)
     except OSError:
         return None

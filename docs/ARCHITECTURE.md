@@ -32,13 +32,15 @@ and the interface never reimplements a rule.
 | `core/scanner.py` | Iterative directory walk with exclusions, cancellation, progress and per-item error capture. |
 | `core/classifier.py` | Extension → category → destination folder. Never opens files. |
 | `core/organizer.py` | `build_plan` (pure) and `execute_plan` (guarded I/O). |
-| `core/fileops.py` | `move_no_overwrite`: the single primitive that moves files. |
+| `core/fileops.py` | `move_no_overwrite`: the single primitive that moves files, with an identity-checked rollback; `open_read_no_follow`: the single primitive that opens files for reading. |
 | `core/undo.py` | `preview_undo` (read-only checks) and `undo_batch` (all-or-nothing preflight, then guarded moves). |
 | `core/history.py` | `HistoryRepository`: batches, operations, scan summaries, statistics, recovery. |
 | `core/duplicates.py` | Size grouping, partial and full SHA-256 hashing, change detection. |
 | `core/large_files.py` | Filters and sorts a completed scan. |
 | `core/metadata.py` | Lightweight metadata and image dimensions from file headers. |
-| `core/watcher.py` | `FolderWatcher` (poll, stability, de-duplication, pause/resume/stop) and `WatchManager`. |
+| `core/watcher.py` | `FolderWatcher` (poll, stability, de-duplication, pause/resume/stop) and `WatchManager`. Stopping cancels the scan and the move batch, and the thread handle is kept until the worker has exited. |
+| `core/export.py` | Read-only CSV/JSON exports of history, scan results and duplicate reports. |
+| `core/recovery.py` | Guidance for moves that did not finish cleanly: where the file is now, and the safest next step. |
 | `database/db.py` | Per-thread connections, `BEGIN IMMEDIATE` transactions, integrity check, corrupt-file preservation. |
 | `database/migrations.py` | Ordered schema migrations tracked with `PRAGMA user_version`. |
 | `utils/paths.py` | Containment checks, safe folder names, unique names, app data location. |

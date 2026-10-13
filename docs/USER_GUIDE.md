@@ -70,6 +70,11 @@ partial hash, then a full SHA-256 hash. Only files with identical content are li
 - **Open file location** opens the selected file's folder in Explorer.
 - **Mark / unmark for review** flags files you want to look at later. It changes nothing on disk.
 - **Copy review list** copies the flagged files' paths to the clipboard.
+- **Export report…** writes the whole duplicate report to a CSV or JSON file you choose. Nothing
+  is deleted by exporting; use the report to decide what to remove yourself.
+
+**Export scan…** on the *Organize Files* page writes the current scan result (every file with its
+category, size and modification time, plus the issues found) to CSV or JSON.
 
 ## Large Files
 
@@ -95,6 +100,9 @@ Automation watches folders you add and handles new or changed files once they st
    With it on, stable files are moved without asking, under the same collision, exclusion and
    revalidation rules, and every move is recorded and can be undone.
 6. **Pause** and **Resume** keep the folder list. **Stop** ends monitoring. **Remove selected** removes a folder.
+   Stopping is immediate: a check that is already running finishes without moving anything else,
+   and the status shows *Stopping* until it has. While it shows *Stopping*, starting again is
+   refused rather than running two watchers at once; the status becomes *Stopped* by itself.
 7. Monitoring only runs while the app is open. Closing the app stops it.
 
 The activity log on the page lists what the watcher did during this session.
@@ -110,6 +118,19 @@ source, destination and **Error / reason**. Dry runs are not recorded.
     afterwards, or its original location is now occupied, **undo is refused and nothing is changed**.
     The page lists the reasons.
   - When it runs, it removes folders the batch created, but only if they are empty.
+- **Recovery guidance…** is for batches that did not finish cleanly (*interrupted*, *partial*,
+  *cancelled*). For each unfinished move it checks where the file actually is and tells you the
+  safe next step:
+  - at the original location only — the move never happened, nothing was lost;
+  - at the new location only — the move finished but was not recorded, so Undo cannot reverse it;
+  - at both — the interrupted move left two copies; both paths are named so you can compare them
+    and delete one yourself. **Neither is deleted for you**, because either could be the newer one;
+  - at neither — another program moved, renamed or deleted it; find it before running anything else.
+
+  The guidance is also shown automatically when you select a batch with one of those statuses.
+- **Export history…** writes every recorded batch and operation to a CSV or JSON file you choose.
+  CSV is written as UTF-8 with a byte order mark so spreadsheet applications read non-ASCII paths.
+  Exporting changes nothing.
 - **Clear history…** deletes the history records only. It never deletes or moves your files.
 - **Refresh** reloads the list.
 
