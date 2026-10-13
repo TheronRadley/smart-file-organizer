@@ -5,8 +5,9 @@ change before it happens, never overwrites or deletes your files, and records wh
 the most recent organization can be undone.
 
 > **Status: early development (`0.1.0.dev0`, no release yet).** The core logic is covered by an
-> automated test suite. The graphical interface has been written and checked for import errors,
-> but it has not yet been run and visually tested on Windows. See [Known limitations](#known-limitations).
+> automated test suite. The graphical interface is built and exercised on a Windows runner in CI —
+> every page opens and the window closes — but it has not been reviewed visually by a person, and
+> the packaged executable has not been produced yet. See [Known limitations](#known-limitations).
 
 ## Screenshots
 
@@ -113,7 +114,9 @@ does not read file contents to classify them (classification uses file names and
 
 ## Known limitations
 
-- The GUI has not been run or visually tested on Windows yet. Its code imports cleanly, and core behaviour is covered by tests.
+- The GUI is exercised by an automated smoke test on a Windows runner (it opens every page, walks
+  the navigation and closes), so build and import errors are caught. Nobody has reviewed the layout
+  visually yet, and the manual checks in `docs/WINDOWS_SAFETY_CHECKLIST.md` have not been run.
 - Classification is by extension only; a misnamed file is organized by its extension.
 - A batch is applied one file at a time. If a move fails, the batch ends as *partial*; History shows which files moved.
 - Undo reverses moves only and refuses rather than guessing when anything has changed.
