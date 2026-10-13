@@ -258,7 +258,7 @@ def test_a_second_start_never_runs_two_worker_threads(
     assert any("Still stopping" in event.message for event in watcher.events)
 
     release.set()
-    assert _wait_until(lambda: not watcher.is_thread_alive)
+    assert _wait_until(lambda: len(_worker_threads(workspace)) == 0), "the first worker never finished"
     watcher.start()
     assert len(_worker_threads(workspace)) == 1
     assert watcher.status == WATCHER_RUNNING

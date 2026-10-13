@@ -15,6 +15,7 @@ import csv
 import json
 import logging
 import os
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -196,7 +197,9 @@ def write_export(export: Export, path: Path | str) -> Path:
             _write_json(export, temporary)
         os.replace(temporary, target)
     except OSError as exc:
-        temporary.unlink(missing_ok=True)
+        # Cleaning up must never mask the real reason the export failed.
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
         raise ExportError(f"Could not write '{target}': {exc.strerror or exc}") from exc
     logger.info("Exported %d %s row(s) to %s", len(export.rows), export.kind, target)
     return target

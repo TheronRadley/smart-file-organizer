@@ -19,7 +19,7 @@ from smart_file_organizer.core.models import BATCH_ORGANIZE, OP_MOVE, STATUS_SUC
 from smart_file_organizer.core.organizer import build_plan, execute_plan
 from smart_file_organizer.core.scanner import scan_folder
 
-from .conftest import is_root_user, make_file
+from .conftest import make_file
 
 
 def _organize(workspace: Path, options: ScanOptions, classifier, history: HistoryRepository) -> str:
@@ -119,17 +119,13 @@ def test_a_folder_as_target_is_refused_rather_than_replaced(tmp_path: Path, hist
 
 
 def test_an_unwritable_target_is_reported_clearly(tmp_path: Path, history: HistoryRepository) -> None:
-    if is_root_user():
-        pytest.skip("Write permissions are not enforced for the root user")
-    locked = tmp_path / "locked"
-    locked.mkdir()
-    locked.chmod(0o500)  # readable, not writable
-    try:
-        with pytest.raises(ExportError, match="Could not write"):
-            write_export(history_export(history), locked / "history.csv")
-        assert not list(locked.iterdir()), "no partial export file may be left behind"
-    finally:
-        locked.chmod(0o700)
+    # The parent "folder" is a file, which no platform lets us create a report inside.
+    blocker = tmp_path / "not-a-folder"
+    blocker.write_text("occupied", encoding="utf-8")
+    with pytest.raises(ExportError, match="Could not write"):
+        write_export(history_export(history), blocker / "history.csv")
+    assert blocker.read_text(encoding="utf-8") == "occupied"
+    assert not list(tmp_path.glob("*.tmp")), "no partial export file may be left behind"
 
 
 def test_export_never_changes_history_or_files(

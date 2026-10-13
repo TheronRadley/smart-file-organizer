@@ -35,7 +35,7 @@ from smart_file_organizer.config import (
     ORGANIZE_MODES,
 )
 from smart_file_organizer.core.classifier import Classifier
-from smart_file_organizer.core.fileops import MoveRollbackError, move_no_overwrite
+from smart_file_organizer.core.fileops import MoveRollbackError, SourceChangedError, move_no_overwrite
 from smart_file_organizer.core.history import HistoryRepository
 from smart_file_organizer.core.models import (
     BATCH_ORGANIZE,
@@ -392,6 +392,13 @@ def _apply_operation(
     )
     try:
         move_no_overwrite(operation.source, target, expected_identity=operation.file_id)
+    except SourceChangedError as exc:
+        # The path was swapped between the check and the move: report, do not follow it.
+        reason = str(exc.strerror)
+        history.update_operation(operation_id, STATUS_SKIPPED, error=reason)
+        return OperationOutcome(
+            operation.index, str(operation.source), str(target), STATUS_SKIPPED, reason, operation.size
+        )
     except FileExistsError:
         reason = "Destination was created by another program during the batch; skipped"
         history.update_operation(operation_id, STATUS_SKIPPED, error=reason)

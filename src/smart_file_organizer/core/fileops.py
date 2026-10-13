@@ -41,8 +41,20 @@ logger = logging.getLogger(__name__)
 UNSAFE_POSIX_MOVE_MESSAGE = "Safe no-overwrite move is not supported on this filesystem (hard links unavailable)"
 
 # ``O_NOFOLLOW`` is POSIX-only; on Windows links are followed, but the scanner
-# never reports them, and the identity check below still applies.
-_OPEN_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+# never reports them, and the identity check below still applies. ``O_BINARY``
+# is Windows-only and makes the read byte-exact (no newline translation).
+_OPEN_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+
+
+class SourceChangedError(OSError):
+    """The source path no longer refers to the file that was validated.
+
+    Raised instead of following the path, so a link or a replacement file
+    swapped in between the caller's check and the move cannot be moved.
+    """
+
+    def __init__(self, message: str, filename: str | None = None) -> None:
+        super().__init__(errno.EINVAL, message, filename)
 
 
 class MoveRollbackError(OSError):
@@ -95,9 +107,9 @@ def move_no_overwrite(source: Path, destination: Path, *, expected_identity: str
     source_stats = os.lstat(source)
     if not stat.S_ISREG(source_stats.st_mode):
         # Refuse to follow a link that was swapped in after the caller checked.
-        raise OSError(errno.EINVAL, "Source is not a regular file; refusing to follow a link", str(source))
+        raise SourceChangedError("Source is not a regular file; refusing to follow a link", str(source))
     if expected_identity is not None and file_identity(source_stats, source) != expected_identity:
-        raise OSError(errno.ESTALE, "Source was replaced before the move; refusing to move it", str(source))
+        raise SourceChangedError("Source was replaced before the move; refusing to move it", str(source))
 
     try:
         os.link(source, destination)

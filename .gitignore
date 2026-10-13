@@ -41,3 +41,7 @@ desktop.ini
 .env.*
 *.pem
 *.key
+
+# CI artifacts
+pytest-output.txt
+failure-details.md

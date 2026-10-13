@@ -6,14 +6,18 @@ destination is replaced by another program while the rollback runs. Deleting a
 file this tool did not create is treated as worse than leaving an extra link.
 """
 
-import errno
 import os
 from pathlib import Path
 
 import pytest
 
 from smart_file_organizer.core import fileops
-from smart_file_organizer.core.fileops import MoveRollbackError, move_no_overwrite, open_read_no_follow
+from smart_file_organizer.core.fileops import (
+    MoveRollbackError,
+    SourceChangedError,
+    move_no_overwrite,
+    open_read_no_follow,
+)
 
 from .conftest import make_file, symlinks_supported
 
@@ -138,10 +142,10 @@ def test_move_is_refused_when_the_source_is_no_longer_the_scanned_file(workspace
     destination = workspace / "Documents" / "source.txt"
     destination.parent.mkdir()
 
-    with pytest.raises(OSError) as info:
+    with pytest.raises(SourceChangedError) as info:
         move_no_overwrite(source, destination, expected_identity="424242:987654321")
 
-    assert info.value.errno == errno.ESTALE
+    assert "replaced" in str(info.value.strerror)
     assert source.read_bytes() == b"payload"
     assert not destination.exists()
 

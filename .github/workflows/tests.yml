@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   test:
@@ -40,17 +41,41 @@ jobs:
       - name: Check formatting
         run: ruff format --check .
 
-      - name: Test
-        run: python -m pytest -q
+      # Split from the GUI test so a desktop-session problem cannot hide a logic
+      # failure, and so the step name says which kind of problem occurred.
+      - name: Test (core and safety regression)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --ignore=tests/test_startup_smoke.py 2>&1 | tee pytest-output.txt
 
-      # The unit tests never import tkinter, so a broken window would only show
+      # The core tests never import tkinter, so a broken window would only show
       # up here. Windows runners have a desktop session, so a skip is a failure:
       # SFO_REQUIRE_GUI makes the test fail instead of skipping.
       - name: GUI startup smoke test
         if: matrix.os == 'windows-latest'
+        shell: bash
         env:
           SFO_REQUIRE_GUI: "1"
-        run: python -m pytest tests/test_startup_smoke.py -v -rs
+        run: |
+          set -o pipefail
+          python -m pytest tests/test_startup_smoke.py -v -rs 2>&1 | tee pytest-output.txt
+
+      - name: Share failure details on the pull request
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "### Test failure on \`${{ matrix.os }}\` (run ${{ github.run_id }})"
+            echo
+            echo '```'
+            tail -n 100 pytest-output.txt 2>/dev/null || echo "(no pytest output; an earlier step failed)"
+            echo '```'
+          } > failure-details.md
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file failure-details.md
 
   audit:
     name: Dependency audit
