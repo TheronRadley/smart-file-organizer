@@ -5,8 +5,9 @@ change before it happens, never overwrites or deletes your files, and records wh
 the most recent organization can be undone.
 
 > **Status: early development (`0.1.0.dev0`, no release yet).** The core logic is covered by an
-> automated test suite. The graphical interface has been written and checked for import errors,
-> but it has not yet been run and visually tested on Windows. See [Known limitations](#known-limitations).
+> automated test suite. The graphical interface is built and exercised on a Windows runner in CI —
+> every page opens and the window closes — but it has not been reviewed visually by a person, and
+> the packaged executable has not been produced yet. See [Known limitations](#known-limitations).
 
 ## Screenshots
 
@@ -32,7 +33,10 @@ _Screenshots have not been captured yet._
   explicit opt-in. Waits until files stop changing, handles each file once, and supports pause,
   resume and stop.
 - **History** — every real operation is recorded with its outcome and reason (dry runs are not).
-  Clearing history never touches your files.
+  Clearing history never touches your files. Batches that did not finish cleanly come with
+  **recovery guidance**: where the file is now, and the safest next step.
+- **Reports** — export history, scan results and duplicate reports to CSV (UTF-8 with BOM, so
+  spreadsheets read non-ASCII paths) or JSON, for auditing and for keeping a record off the machine.
 - **Dashboard** — shows real results from your scans and history.
 - **Settings** — collision rule, organization method, category folder names, exclusions, extension
   overrides, watch options, dark (default) or light theme.
@@ -77,6 +81,11 @@ ruff format --check .
 
 The tests use temporary folders only. They never read or write your real files or settings.
 
+CI also runs a GUI startup smoke test on Windows (the unit tests never import tkinter) and
+audits the pinned dependencies for known vulnerabilities with `pip-audit`. Manual Windows
+checks that cannot be automated are listed in
+[docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md).
+
 ## Build a Windows executable
 
 ```powershell
@@ -105,7 +114,9 @@ does not read file contents to classify them (classification uses file names and
 
 ## Known limitations
 
-- The GUI has not been run or visually tested on Windows yet. Its code imports cleanly, and core behaviour is covered by tests.
+- The GUI is exercised by an automated smoke test on a Windows runner (it opens every page, walks
+  the navigation and closes), so build and import errors are caught. Nobody has reviewed the layout
+  visually yet, and the manual checks in `docs/WINDOWS_SAFETY_CHECKLIST.md` have not been run.
 - Classification is by extension only; a misnamed file is organized by its extension.
 - A batch is applied one file at a time. If a move fails, the batch ends as *partial*; History shows which files moved.
 - Undo reverses moves only and refuses rather than guessing when anything has changed.

@@ -225,10 +225,10 @@ def test_partial_batch_reports_each_outcome(
     plan = _plan(workspace, options, classifier)
     real_move = organizer.move_no_overwrite
 
-    def flaky_move(source: Path, destination: Path) -> None:
+    def flaky_move(source: Path, destination: Path, **kwargs) -> None:
         if source.name == "b.pdf":
             raise PermissionError(13, "Permission denied", str(source))
-        real_move(source, destination)
+        real_move(source, destination, **kwargs)
 
     monkeypatch.setattr(organizer, "move_no_overwrite", flaky_move)
     outcome = execute_plan(plan, history=history)
@@ -333,3 +333,126 @@ def test_move_no_overwrite_fails_closed_on_posix_without_hard_links(
     assert "hard links unavailable" in outcome.outcomes[0].reason
     assert source.read_bytes() == b"important-data"
     assert not (workspace / "Documents" / "report.pdf").exists()
+
+
+# ----- check/use races between the preview and the move --------------------
+
+
+def test_source_replaced_by_a_link_outside_the_folder_is_refused(
+    workspace: Path, options: ScanOptions, classifier: Classifier, history: HistoryRepository, tmp_path: Path
+) -> None:
+    from .conftest import symlinks_supported
+
+    if not symlinks_supported(tmp_path):
+        pytest.skip("Symbolic links are not permitted in this environment")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside content")
+    source = make_file(workspace / "report.pdf", b"original")
+    plan = _plan(workspace, options, classifier)
+
+    source.unlink()
+    os.symlink(outside, source)  # the same name now points at a file elsewhere
+
+    outcome = execute_plan(plan, history=history)
+    assert outcome.success_count == 0
+    assert "outside the selected folder" in outcome.outcomes[0].reason
+    assert os.path.islink(source), "the link must be left exactly as it was found"
+    assert outside.read_bytes() == b"outside content"
+    assert not (workspace / "Documents" / "report.pdf").exists()
+
+
+def test_source_replaced_by_a_link_inside_the_folder_is_refused(
+    workspace: Path, options: ScanOptions, classifier: Classifier, history: HistoryRepository, tmp_path: Path
+) -> None:
+    from .conftest import symlinks_supported
+
+    if not symlinks_supported(tmp_path):
+        pytest.skip("Symbolic links are not permitted in this environment")
+    source = make_file(workspace / "report.pdf", b"original")
+    plan = _plan(workspace, options, classifier)
+    other = make_file(workspace / "other.pdf", b"other content")  # added after the preview: not part of the batch
+
+    source.unlink()
+    os.symlink(other, source)  # inside the root, so only the regular-file check can catch it
+
+    outcome = execute_plan(plan, history=history)
+    report = next(o for o in outcome.outcomes if o.source.endswith("report.pdf"))
+    assert report.status == STATUS_SKIPPED
+    assert "not a regular file" in report.reason
+    assert os.path.islink(source)
+    assert other.read_bytes() == b"other content"
+    assert not (workspace / "Documents" / "report.pdf").exists()
+
+
+def test_destination_folder_replaced_by_a_link_is_refused(
+    workspace: Path, options: ScanOptions, classifier: Classifier, history: HistoryRepository, tmp_path: Path
+) -> None:
+    from .conftest import symlinks_supported
+
+    if not symlinks_supported(tmp_path):
+        pytest.skip("Symbolic links are not permitted in this environment")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    make_file(workspace / "report.pdf", b"original")
+    plan = _plan(workspace, options, classifier)
+    os.symlink(outside, workspace / "Documents")
+
+    outcome = execute_plan(plan, history=history)
+    assert outcome.success_count == 0
+    assert "blocked by a file or link" in outcome.outcomes[0].reason
+    assert list(outside.iterdir()) == [], "nothing may be written through a link out of the folder"
+    assert (workspace / "report.pdf").read_bytes() == b"original"
+
+
+def test_source_swapped_while_the_destination_folder_is_created_is_refused(
+    workspace: Path,
+    options: ScanOptions,
+    classifier: Classifier,
+    history: HistoryRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = make_file(workspace / "report.pdf", b"original")
+    plan = _plan(workspace, options, classifier)
+    real_mkdir = os.mkdir
+
+    def mkdir_then_swap(path, *args, **kwargs):
+        result = real_mkdir(path, *args, **kwargs)
+        # Another program replaces the source while the destination folder is created.
+        source.unlink()
+        make_file(source, b"a longer replacement")
+        return result
+
+    monkeypatch.setattr(organizer.os, "mkdir", mkdir_then_swap)
+    outcome = execute_plan(plan, history=history)
+
+    assert outcome.success_count == 0
+    assert "after the preview" in outcome.outcomes[0].reason
+    assert source.read_bytes() == b"a longer replacement", "the replacement file must not have been moved"
+    assert not (workspace / "Documents" / "report.pdf").exists()
+
+
+def test_destination_appearing_during_the_batch_is_not_overwritten(
+    workspace: Path,
+    options: ScanOptions,
+    classifier: Classifier,
+    history: HistoryRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_file(workspace / "report.pdf", b"incoming")
+    plan = _plan(workspace, options, classifier)
+    real_move = organizer.move_no_overwrite
+
+    def occupy_destination_then_move(source: Path, destination: Path, **kwargs) -> None:
+        # Another program creates the target after every check but before the move.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"written by another program")
+        real_move(source, destination, **kwargs)
+
+    monkeypatch.setattr(organizer, "move_no_overwrite", occupy_destination_then_move)
+    outcome = execute_plan(plan, history=history)
+
+    assert outcome.success_count == 0
+    assert outcome.skipped_count == 1
+    assert "another program" in outcome.outcomes[0].reason
+    assert (workspace / "Documents" / "report.pdf").read_bytes() == b"written by another program"
+    assert (workspace / "report.pdf").read_bytes() == b"incoming", "the source stays put; nothing is overwritten"

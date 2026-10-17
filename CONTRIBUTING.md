@@ -25,7 +25,13 @@ ruff check .
 python -m pytest
 ```
 
-CI runs the same commands on Windows and Linux.
+CI runs the same commands on Windows and Linux, plus:
+
+- a GUI startup smoke test on Windows (`tests/test_startup_smoke.py`, with `SFO_REQUIRE_GUI=1`
+  so a missing desktop session fails instead of skipping);
+- `pip-audit` over the pinned dependencies;
+- the manual checks in [docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md)
+  before a release. These need a real Windows desktop and are not automated.
 
 ## Guidelines
 

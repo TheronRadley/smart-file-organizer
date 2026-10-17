@@ -95,22 +95,26 @@ class Settings:
     theme: str = "dark"
 
 
+_INVALID = object()  # sentinel: this value is unusable, keep the default
+
+
 def settings_from_dict(raw: dict[str, Any]) -> Settings:
-    """Build settings from parsed JSON, ignoring unknown keys and invalid values."""
+    """Build settings from parsed JSON, ignoring unknown keys and invalid values.
+
+    Every value is validated by *content*, not just by container type: the
+    settings file is plain JSON that users can edit by hand, and a single wrong
+    item inside a list or a dictionary must not be able to crash a scan or the
+    folder configuration later on. Anything unusable is logged and replaced by
+    the corresponding default.
+    """
     settings = Settings()
     defaults = asdict(settings)
     for item in fields(Settings):
         if item.name not in raw:
             continue
-        value = raw[item.name]
-        default = defaults[item.name]
-        expected = type(default)
-        if expected is float and isinstance(value, int) and not isinstance(value, bool):
-            value = float(value)
-        if not isinstance(value, expected) or isinstance(value, bool) != isinstance(default, bool):
-            logger.warning("Ignoring invalid setting %s=%r", item.name, value)
-            continue
-        setattr(settings, item.name, value)
+        cleaned = _validated(item.name, raw[item.name], defaults[item.name])
+        if cleaned is not _INVALID:
+            setattr(settings, item.name, cleaned)
 
     if settings.collision_strategy not in COLLISION_STRATEGIES:
         settings.collision_strategy = COLLISION_RENAME
@@ -121,6 +125,67 @@ def settings_from_dict(raw: dict[str, Any]) -> Settings:
     settings.watch_interval_seconds = max(1, min(settings.watch_interval_seconds, 3600))
     settings.large_file_min_mb = max(0.0, settings.large_file_min_mb)
     return settings
+
+
+def _reject(name: str, value: Any) -> Any:
+    logger.warning("Ignoring invalid setting %s=%r", name, value)
+    return _INVALID
+
+
+def _validated(name: str, value: Any, default: Any) -> Any:
+    """Return ``value`` when it matches the shape of ``default``, else the sentinel."""
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else _reject(name, value)
+    if isinstance(default, int):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return _reject(name, value)
+        return value
+    if isinstance(default, float):
+        if isinstance(value, bool):
+            return _reject(name, value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return _reject(name, value)
+    if isinstance(default, str):
+        return value if isinstance(value, str) else _reject(name, value)
+    if isinstance(default, dict):
+        return _validated_dict(name, value)
+    if isinstance(default, list):
+        return _validated_list(name, value, default)
+    return _reject(name, value)
+
+
+def _validated_list(name: str, value: Any, default: list[str]) -> Any:
+    """Keep the usable strings of a list; fall back to the default if none survive."""
+    if not isinstance(value, list):
+        return _reject(name, value)
+    items: list[str] = []
+    dropped = 0
+    for element in value:
+        if not isinstance(element, str) or not element.strip():
+            logger.warning("Ignoring invalid entry %r in setting %s", element, name)
+            dropped += 1
+            continue
+        items.append(element)
+    if dropped and not items and default:
+        # Every entry was unusable: an empty exclusion list would silently
+        # weaken the protections, so the shipped defaults are used instead.
+        logger.warning("No usable entry left in %s; using the defaults", name)
+        return list(default)
+    return items
+
+
+def _validated_dict(name: str, value: Any) -> Any:
+    """Keep the usable string-to-string pairs of a dictionary."""
+    if not isinstance(value, dict):
+        return _reject(name, value)
+    cleaned: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str) or not item.strip():
+            logger.warning("Ignoring invalid entry %r in setting %s", (key, item), name)
+            continue
+        cleaned[key] = item
+    return cleaned
 
 
 def load_settings(path: Path) -> Settings:

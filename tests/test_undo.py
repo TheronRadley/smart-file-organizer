@@ -139,10 +139,10 @@ def test_partial_undo_can_be_completed_later(
 
     real_move = undo_module.move_no_overwrite
 
-    def fail_for_b(source: Path, destination: Path) -> None:
+    def fail_for_b(source: Path, destination: Path, **kwargs) -> None:
         if source.name == "b.pdf":
             raise PermissionError(13, "Permission denied", str(source))
-        real_move(source, destination)
+        real_move(source, destination, **kwargs)
 
     monkeypatch.setattr(undo_module, "move_no_overwrite", fail_for_b)
     result = undo_batch(batch_id, history)
@@ -169,3 +169,46 @@ def test_folder_with_new_user_files_is_kept(
     assert result.restored == 1
     assert result.kept_folders == 1
     assert (workspace / "Documents" / "added-later.txt").exists()
+
+
+def test_undo_refuses_when_the_organized_file_became_a_symlink(
+    workspace: Path, options: ScanOptions, classifier: Classifier, history: HistoryRepository, tmp_path: Path
+) -> None:
+    from .conftest import symlinks_supported
+
+    if not symlinks_supported(tmp_path):
+        pytest.skip("Symbolic links are not permitted in this environment")
+    make_file(workspace / "report.pdf", b"organized content")
+    batch_id = _organize(workspace, options, classifier, history)
+    other = make_file(workspace / "other.pdf", b"other content")  # added after the batch: not part of it
+
+    moved = workspace / "Documents" / "report.pdf"
+    moved.unlink()
+    os.symlink(other, moved)  # inside the root, so only the regular-file check can catch it
+
+    with pytest.raises(UndoError, match="no longer a regular file"):
+        undo_batch(batch_id, history)
+    assert other.read_bytes() == b"other content", "the link target must not be moved"
+    assert not (workspace / "report.pdf").exists()
+
+
+def test_undo_refuses_when_the_organized_path_points_outside_the_folder(
+    workspace: Path, options: ScanOptions, classifier: Classifier, history: HistoryRepository, tmp_path: Path
+) -> None:
+    from .conftest import symlinks_supported
+
+    if not symlinks_supported(tmp_path):
+        pytest.skip("Symbolic links are not permitted in this environment")
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"outside content")
+    make_file(workspace / "report.pdf", b"organized content")
+    batch_id = _organize(workspace, options, classifier, history)
+
+    moved = workspace / "Documents" / "report.pdf"
+    moved.unlink()
+    os.symlink(outside, moved)
+
+    with pytest.raises(UndoError, match="outside the batch folder"):
+        undo_batch(batch_id, history)
+    assert outside.read_bytes() == b"outside content"
+    assert not (workspace / "report.pdf").exists()

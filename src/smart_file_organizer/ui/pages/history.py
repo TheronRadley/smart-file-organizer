@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
+from smart_file_organizer.core.export import ExportError, history_export, write_export
 from smart_file_organizer.core.models import (
     OP_CREATE_FOLDER,
     BatchRecord,
     OperationRecord,
 )
+from smart_file_organizer.core.recovery import UNFINISHED_BATCH_STATUSES, RecoveryError, recovery_steps
 from smart_file_organizer.core.undo import (
     UndoError,
     UndoPreview,
@@ -40,6 +42,8 @@ class HistoryPage(BasePage):
         button(toolbar, "Undo selected batch…", self._undo, primary=True, width=200).pack(side="left")
         button(toolbar, "Refresh", self.refresh, width=110).pack(side="left", padx=8)
         button(toolbar, "Clear history…", self._clear, width=150).pack(side="left")
+        button(toolbar, "Recovery guidance…", self._recovery, width=170).pack(side="left", padx=8)
+        button(toolbar, "Export history…", self._export, width=150).pack(side="left")
         self._note = muted_label(toolbar, "")
         self._note.pack(side="right")
 
@@ -123,6 +127,9 @@ class HistoryPage(BasePage):
                 operation,
                 tags=("bad",) if operation.status in ("failed", "interrupted") else (),
             )
+        if batch.status in UNFINISHED_BATCH_STATUSES:
+            # An unfinished batch is exactly when the user needs to know what to do next.
+            self._recovery(silent_when_clean=True)
 
     def _undo(self) -> None:
         batch = self._selected_batch()
@@ -173,6 +180,41 @@ class HistoryPage(BasePage):
             f"No files were changed.\n{message}",
             color=theme.DANGER,
         )
+
+    def _recovery(self, *, silent_when_clean: bool = False) -> None:
+        batch = self._selected_batch() if not silent_when_clean else self._batches.selected_payload()
+        if batch is None:
+            return
+        try:
+            steps = recovery_steps(batch.id, self.ctx.history)
+        except RecoveryError as exc:
+            dialogs.error(self, "No guidance", str(exc))
+            return
+        if not steps:
+            if not silent_when_clean:
+                self._banner.show(
+                    "Every move in this batch finished cleanly. Nothing needs attention.", color=theme.SUCCESS
+                )
+            return
+        lines = "\n".join(f"• {step.text}" for step in steps[:8])
+        extra = len(steps) - 8
+        if extra > 0:
+            lines += f"\n…and {extra} more."
+        self._banner.show(f"{len(steps)} move(s) need a decision:\n{lines}", color=theme.WARNING)
+
+    def _export(self) -> None:
+        if not self.ctx.history.list_batches(limit=1):
+            dialogs.info(self, "Nothing to export", "History is empty.")
+            return
+        path = dialogs.choose_save_path(self, "Export history", "history.csv")
+        if not path:
+            return
+        try:
+            written = write_export(history_export(self.ctx.history), path)
+        except ExportError as exc:
+            dialogs.error(self, "Could not export", str(exc))
+            return
+        self.notify(f"History exported to {written}")
 
     def _clear(self) -> None:
         if not dialogs.confirm(

@@ -35,7 +35,7 @@ from smart_file_organizer.config import (
     ORGANIZE_MODES,
 )
 from smart_file_organizer.core.classifier import Classifier
-from smart_file_organizer.core.fileops import move_no_overwrite
+from smart_file_organizer.core.fileops import MoveRollbackError, SourceChangedError, move_no_overwrite
 from smart_file_organizer.core.history import HistoryRepository
 from smart_file_organizer.core.models import (
     BATCH_ORGANIZE,
@@ -67,6 +67,7 @@ ProgressCallback = Callable[[int, int], None]
 DATE_FOLDER_FORMAT = "%Y-%m"
 NO_EXTENSION_FOLDER = "No Extension"
 MAX_COLLISION_NUMBER = 10_000
+CANCELLED_REASON = "Cancelled before this file was processed"
 
 
 def destination_folder_for(entry: FileEntry, organize_by: str, classifier: Classifier) -> str:
@@ -277,9 +278,7 @@ def execute_plan(
         if cancel_event is not None and cancel_event.is_set():
             outcome.cancelled = True
             for remaining in operations[position - 1 :]:
-                outcome.outcomes.append(
-                    _record_skip(remaining, "Cancelled before this file was processed", history, batch_id)
-                )
+                outcome.outcomes.append(_record_skip(remaining, CANCELLED_REASON, history, batch_id))
             break
         outcome.outcomes.append(_apply_operation(operation, plan, dry_run, history, batch_id))
         if progress is not None:
@@ -375,6 +374,12 @@ def _apply_operation(
     if not destination_dir.is_dir() or is_link_like(destination_dir):
         return _record_skip(operation, "Destination folder is no longer a plain folder", history, batch_id)
 
+    # Final re-validation: creating the destination folder can take arbitrarily
+    # long, so the source is checked again immediately before it is moved.
+    refusal = check_source(operation, plan.root)
+    if refusal is not None:
+        return _record_skip(operation, refusal, history, batch_id)
+
     operation_id = history.record_operation(
         batch_id,
         OP_MOVE,
@@ -386,7 +391,14 @@ def _apply_operation(
         status=STATUS_PENDING,
     )
     try:
-        move_no_overwrite(operation.source, target)
+        move_no_overwrite(operation.source, target, expected_identity=operation.file_id)
+    except SourceChangedError as exc:
+        # The path was swapped between the check and the move: report, do not follow it.
+        reason = str(exc.strerror)
+        history.update_operation(operation_id, STATUS_SKIPPED, error=reason)
+        return OperationOutcome(
+            operation.index, str(operation.source), str(target), STATUS_SKIPPED, reason, operation.size
+        )
     except FileExistsError:
         reason = "Destination was created by another program during the batch; skipped"
         history.update_operation(operation_id, STATUS_SKIPPED, error=reason)
@@ -395,6 +407,9 @@ def _apply_operation(
         )
     except OSError as exc:
         reason = f"Move failed: {describe_os_error(exc)}"
+        if isinstance(exc, MoveRollbackError):
+            # Nothing was lost, but an extra copy was kept: say so, and how to resolve it.
+            reason = f"{reason}. {exc.recovery}"
         history.update_operation(operation_id, STATUS_FAILED, error=reason)
         logger.warning("Move of %s failed: %s", operation.source.name, exc)
         return OperationOutcome(

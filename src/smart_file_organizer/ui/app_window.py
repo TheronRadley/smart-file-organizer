@@ -193,6 +193,6 @@ class App(ctk.CTk):
             "it will be shown as interrupted next time. Close anyway?",
         ):
             return
-        self.ctx.watches.stop_all()
+        self.ctx.watches.stop_all(timeout=3.0)  # bounded: a slow folder must not block closing
         logger.info("Application closing")
         self.destroy()

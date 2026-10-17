@@ -102,7 +102,7 @@ def test_cancellation_returns_partial_report(workspace: Path, recursive_options:
 
 
 class _EditDuringRead:
-    """File wrapper that rewrites the file on disk right after its first read."""
+    """Handle wrapper that rewrites the file on disk right after its first read."""
 
     def __init__(self, real, path: Path) -> None:
         self._real = real
@@ -114,6 +114,9 @@ class _EditDuringRead:
 
     def __exit__(self, *exc_info) -> None:
         self._real.close()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
 
     def read(self, size: int = -1) -> bytes:
         data = self._real.read(size)
@@ -130,11 +133,13 @@ def test_file_changing_while_hashed_is_excluded(
 
     make_file(workspace / "a.bin", b"dup")
     make_file(workspace / "b.bin", b"dup")
+    real_open = duplicates.open_read_no_follow
 
-    def open_with_edit(path, mode="rb", *args, **kwargs):
-        return _EditDuringRead(open(path, mode, *args, **kwargs), Path(path))
+    def open_with_edit(path: Path):
+        handle, stats = real_open(path)
+        return _EditDuringRead(handle, Path(path)), stats
 
-    monkeypatch.setitem(duplicates.__dict__, "open", open_with_edit)
+    monkeypatch.setattr(duplicates, "open_read_no_follow", open_with_edit)
     report = find_duplicates(workspace, recursive_options)
     assert report.groups == ()
     assert any("Changed while being compared" in issue.message for issue in report.issues)

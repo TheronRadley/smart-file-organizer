@@ -13,6 +13,7 @@ from smart_file_organizer.config import (
     ORGANIZE_BY_EXTENSION,
     ORGANIZE_BY_TYPE,
 )
+from smart_file_organizer.core.export import ExportError, scan_export, write_export
 from smart_file_organizer.core.metadata import read_metadata
 from smart_file_organizer.core.models import (
     STATUS_FAILED,
@@ -116,6 +117,7 @@ class OrganizePage(BasePage):
         )
         self._sort.pack(side="left", padx=8)
         button(filters, "Apply filters", self._apply_filters, width=120).pack(side="left")
+        button(filters, "Export scan…", self._export, width=130).pack(side="left", padx=8)
         self._search.bind("<Return>", lambda _e: self._apply_filters())
         self._extension.bind("<Return>", lambda _e: self._apply_filters())
 
@@ -151,6 +153,22 @@ class OrganizePage(BasePage):
         button(details, "Open containing folder", self._open_selected_folder, width=200).pack(
             anchor="w", padx=16, pady=12
         )
+
+    def _export(self) -> None:
+        """Write the current scan result to a CSV or JSON report."""
+        scan = self.ctx.last_scan
+        if scan is None:
+            dialogs.info(self, "Nothing to export", "Scan a folder first.")
+            return
+        path = dialogs.choose_save_path(self, "Export scan results", "scan.csv")
+        if not path:
+            return
+        try:
+            written = write_export(scan_export(scan), path)
+        except ExportError as exc:
+            dialogs.error(self, "Could not export", str(exc))
+            return
+        self.notify(f"Scan exported to {written}")
 
     def _apply_filters(self) -> None:
         self._files.clear()
