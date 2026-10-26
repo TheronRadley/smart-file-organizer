@@ -4,7 +4,7 @@
 
 <br>
 
-**Sort your files — with a preview, a safety net, and an undo button.**
+**Sort your files - with a preview, a safety net, and an undo button.**
 
 Smart File Organizer is a Windows desktop app that organizes messy folders
 without ever overwriting, deleting, or surprising you. Every move is previewed
@@ -32,7 +32,7 @@ first, recorded in history, and reversible.
 Most organizers move first and explain later. This one is built the other way around:
 
 - **Preview before anything moves.** Scan a folder, inspect the exact plan, run a dry run, then apply only the moves you selected.
-- **Nothing is ever overwritten or deleted.** Collisions are renamed (`name (2).ext`) or skipped — your existing files are never replaced.
+- **Nothing is ever overwritten or deleted.** Collisions are renamed (`name (2).ext`) or skipped - your existing files are never replaced.
 - **Every move can be undone.** Batches are recorded in a local history and reversed only when every file is exactly where it was left; otherwise nothing changes and you are told why.
 - **Private by design.** Everything runs on your machine. No accounts, no network requests, no telemetry.
 
@@ -40,10 +40,10 @@ Most organizers move first and explain later. This one is built the other way ar
 
 | | |
 |---|---|
-| **Organize** | Sort by type (10 categories + Other), extension, or modified month — with per-file selection and collision handling |
+| **Organize** | Sort by type (10 categories + Other), extension, or modified month - with per-file selection and collision handling |
 | **Duplicate Finder** | Groups identical files by size and SHA-256, reports recoverable space, and never deletes anything |
 | **Large Files** | Surfaces the biggest files above a threshold, with honest incomplete-result warnings |
-| **Automation** | Optional folder monitoring — preview-first by default, waits for files to finish copying, stop means stop |
+| **Automation** | Optional folder monitoring - preview-first by default, waits for files to finish copying, stop means stop |
 | **History & Recovery** | Full audit trail, guarded undo, and step-by-step guidance for batches interrupted mid-run |
 | **Reports** | Export history, scans, and duplicate reports to spreadsheet-safe CSV or JSON |
 
@@ -52,7 +52,7 @@ Most organizers move first and explain later. This one is built the other way ar
 - Symbolic links and Windows junctions are never followed
 - Source files are re-validated by identity immediately before each move
 - Exports refuse to silently overwrite an existing report
-- A stopped watcher moves nothing further — and never runs two workers
+- A stopped watcher moves nothing further - and never runs two workers
 
 The full guarantees, limits, and threat model live in **[docs/SAFETY.md](docs/SAFETY.md)**.
 
@@ -78,13 +78,13 @@ python -m pip install -r requirements-dev.txt
 pyinstaller --noconfirm --clean --windowed --name SmartFileOrganizer --paths src --collect-all customtkinter app.py
 ```
 
-Output: `dist\SmartFileOrganizer\SmartFileOrganizer.exe` — the same command runs in the **Windows build** GitHub Actions workflow.
+Output: `dist\SmartFileOrganizer\SmartFileOrganizer.exe` - the same command runs in the **Windows build** GitHub Actions workflow.
 
 ## Development
 
 ```powershell
 python -m pip install -r requirements-dev.txt
-python -m pytest            # tests use temporary folders only — never your real files
+python -m pytest            # tests use temporary folders only - never your real files
 ruff check .
 ruff format --check .
 ```
@@ -103,11 +103,11 @@ Set `SFO_DATA_DIR` to use a different folder.
 
 ## Status
 
-Early development (`0.1.0.dev0`) — no installer, code signing, or published release yet. The core logic is covered by an automated test suite on Windows, Linux, and macOS runners; the interface is smoke-tested in CI but has not yet had a full visual review, and the manual Windows safety checklist is still to be run. Honest, specific status — no surprises, just like the app.
+Early development (`0.1.0.dev0`) - no installer, code signing, or published release yet. The core logic is covered by an automated test suite on Windows, Linux, and macOS runners; the interface is smoke-tested in CI but has not yet had a full visual review, and the manual Windows safety checklist is still to be run. Honest, specific status - no surprises, just like the app.
 
 ## License
 
-**Free to use, study, modify, and fork — never to sell, and never to pass off as your own.**
+**Free to use, study, modify, and fork - never to sell, and never to pass off as your own.**
 
 Smart File Organizer is source-available under the [Smart File Organizer License](LICENSE). Anyone may use, copy, modify, and redistribute it free of charge with attribution. Selling it (or any fork of it), claiming authorship, impersonating the author, or using the name and logo to imply official status is prohibited.
 

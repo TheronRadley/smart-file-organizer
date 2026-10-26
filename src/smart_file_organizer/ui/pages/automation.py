@@ -142,7 +142,7 @@ class AutomationPage(BasePage):
             watcher = self.ctx.watches.get(Path(folder))
             status = _describe_status(watcher.status if watcher else "stopped")
             pending = str(len(watcher.pending)) if watcher else "0"
-            last = watcher.events[-1].text.split("  ", 1)[-1] if watcher and watcher.events else "—"
+            last = watcher.events[-1].text.split("  ", 1)[-1] if watcher and watcher.events else "-"
             if watcher and watcher.last_error:
                 last = watcher.last_error
             self._folders.insert([folder, status, pending, last], folder)
@@ -150,7 +150,7 @@ class AutomationPage(BasePage):
         self._pending.clear()
         for watcher in self.ctx.watches.watchers():
             for item in watcher.pending:
-                self._pending.insert([item.source.name, str(item.destination or "—"), format_size(item.size)], item)
+                self._pending.insert([item.source.name, str(item.destination or "-"), format_size(item.size)], item)
 
         lines: list[str] = []
         for watcher in self.ctx.watches.watchers():

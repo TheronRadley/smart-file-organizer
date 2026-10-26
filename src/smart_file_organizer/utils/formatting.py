@@ -21,16 +21,16 @@ def format_size(num_bytes: int) -> str:
 
 
 def format_timestamp(timestamp: float | None) -> str:
-    """Format a POSIX timestamp in local time; ``—`` when unknown."""
+    """Format a POSIX timestamp in local time; ``-`` when unknown."""
     if timestamp is None:
-        return "—"
+        return "-"
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
 
 
 def format_ns_timestamp(nanoseconds: int | None) -> str:
     """Format a nanosecond timestamp (as returned by ``os.stat``)."""
     if nanoseconds is None:
-        return "—"
+        return "-"
     return format_timestamp(nanoseconds / 1_000_000_000)
 
 

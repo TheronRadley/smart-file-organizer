@@ -123,7 +123,7 @@ class DashboardPage(BasePage):
             self._storage.set_value(format_size(scan.total_bytes))
             self._categories.set_value(f"{len(scan.category_counts)}")
             largest = max(scan.entries, key=lambda entry: entry.size, default=None)
-            self._largest.set_value(format_size(largest.size) if largest else "—")
+            self._largest.set_value(format_size(largest.size) if largest else "-")
             self._chart.set_data(list(scan.category_counts.items()))
             self._largest_table.clear()
             for entry in sorted(scan.entries, key=lambda e: -e.size)[:8]:
@@ -131,7 +131,7 @@ class DashboardPage(BasePage):
         else:
             self._empty.grid()
             for card in (self._files, self._storage, self._categories, self._largest):
-                card.set_value("—")
+                card.set_value("-")
             self._chart.set_data([])
             self._largest_table.clear()
 

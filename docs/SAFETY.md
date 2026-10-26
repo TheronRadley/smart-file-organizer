@@ -17,7 +17,7 @@ what it does not, and what to do when something goes wrong.
    while POSIX fails closed and leaves the source untouched rather than risking an overwrite
    (see *Limitations*).
 4. **A failed move never deletes a file it did not create.** If the original cannot be
-   removed after the link was created, the extra link is removed again — but only after it
+   removed after the link was created, the extra link is removed again - but only after it
    has been proved, by device and inode, to still be the link this operation created *and*
    to still refer to the same file object as the source. If another program replaced that
    path in the meantime, or the filesystem reports no file identifier, the copy is kept and
@@ -94,7 +94,7 @@ occupies the original path), then try again.
 and any operation that was still in progress is marked `interrupted` with the message
 "Application stopped before this operation finished; check the file locations manually."
 Open *History*, select the batch, and press **Recovery guidance…**: it checks where the file
-actually is now and states the safe next step for each one —
+actually is now and states the safe next step for each one -
 - at the original location only: the move never happened, nothing was lost;
 - at the new location only: the move finished but was not recorded, so Undo cannot reverse it;
 - at both: the interrupted move left two copies, and both paths are named so you can compare

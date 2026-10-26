@@ -228,10 +228,10 @@ class OrganizePage(BasePage):
         if entry is None:
             return
         metadata = read_metadata(entry)
-        dimensions = f"{metadata.dimensions[0]} × {metadata.dimensions[1]} px" if metadata.dimensions else "—"
+        dimensions = f"{metadata.dimensions[0]} × {metadata.dimensions[1]} px" if metadata.dimensions else "-"
         lines = [
             f"Name: {metadata.name}",
-            f"Extension: {metadata.extension or '—'}",
+            f"Extension: {metadata.extension or '-'}",
             f"Size: {format_size(metadata.size)} ({metadata.size:,} bytes)",
             f"Created: {format_timestamp(metadata.created_ts)}",
             f"Modified: {format_ns_timestamp(metadata.modified_ns)}",
@@ -326,7 +326,7 @@ class OrganizePage(BasePage):
             target = (
                 f"{operation.destination_folder}/{operation.destination.name}"
                 if operation.destination is not None and operation.destination_folder
-                else "—"
+                else "-"
             )
             iid = self._plan_table.insert(
                 [operation.source_relative, target, format_size(operation.size), status_text],
@@ -380,7 +380,7 @@ class OrganizePage(BasePage):
         self.runner.submit(
             "dry-run",
             work,
-            on_success=lambda outcome: self._show_outcome(plan, outcome, "Dry run complete — nothing was changed."),
+            on_success=lambda outcome: self._show_outcome(plan, outcome, "Dry run complete - nothing was changed."),
             on_error=lambda message: dialogs.error(self, "Dry run failed", message),
         )
 
@@ -450,7 +450,7 @@ class OrganizePage(BasePage):
             lines.append(f"Batch ID: {outcome.batch_id} (see History to review or undo)")
         for item in outcome.outcomes:
             if item.status in (STATUS_FAILED, STATUS_SKIPPED):
-                lines.append(f"  {item.status.upper()}: {item.source} — {item.reason}")
+                lines.append(f"  {item.status.upper()}: {item.source} - {item.reason}")
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")
         self._log.insert("end", "\n".join(lines) + "\n")

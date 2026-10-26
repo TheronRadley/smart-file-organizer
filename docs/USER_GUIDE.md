@@ -121,11 +121,11 @@ source, destination and **Error / reason**. Dry runs are not recorded.
 - **Recovery guidance…** is for batches that did not finish cleanly (*interrupted*, *partial*,
   *cancelled*). For each unfinished move it checks where the file actually is and tells you the
   safe next step:
-  - at the original location only — the move never happened, nothing was lost;
-  - at the new location only — the move finished but was not recorded, so Undo cannot reverse it;
-  - at both — the interrupted move left two copies; both paths are named so you can compare them
+  - at the original location only - the move never happened, nothing was lost;
+  - at the new location only - the move finished but was not recorded, so Undo cannot reverse it;
+  - at both - the interrupted move left two copies; both paths are named so you can compare them
     and delete one yourself. **Neither is deleted for you**, because either could be the newer one;
-  - at neither — another program moved, renamed or deleted it; find it before running anything else.
+  - at neither - another program moved, renamed or deleted it; find it before running anything else.
 
   The guidance is also shown automatically when you select a batch with one of those statuses.
 - **Export history…** writes every recorded batch and operation to a CSV or JSON file you choose.
