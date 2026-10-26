@@ -1,59 +1,64 @@
-# Smart File Organizer
+<div align="center">
 
-A Windows desktop app for sorting, finding and safely cleaning up files. It previews every
-change before it happens, never overwrites or deletes your files, and records what it did so
-the most recent organization can be undone.
+<img src="assets/logo.png" alt="Smart File Organizer" width="640">
 
-> **Status: early development (`0.1.0.dev0`, no release yet).** The core logic is covered by an
-> automated test suite. The graphical interface is built and exercised on a Windows runner in CI —
-> every page opens and the window closes — but it has not been reviewed visually by a person, and
-> the packaged executable has not been produced yet. See [Known limitations](#known-limitations).
+<br>
 
-## Screenshots
+**Sort your files — with a preview, a safety net, and an undo button.**
 
-_Screenshots have not been captured yet._
+Smart File Organizer is a Windows desktop app that organizes messy folders
+without ever overwriting, deleting, or surprising you. Every move is previewed
+first, recorded in history, and reversible.
 
-- `[Screenshot placeholder: Dashboard]`
-- `[Screenshot placeholder: Organize Files preview]`
-- `[Screenshot placeholder: Duplicate Finder]`
-- `[Screenshot placeholder: History and guarded undo]`
+<br>
+
+[![Tests](https://github.com/TheronRadley/smart-file-organizer/actions/workflows/tests.yml/badge.svg)](https://github.com/TheronRadley/smart-file-organizer/actions/workflows/tests.yml)
+[![Windows build](https://github.com/TheronRadley/smart-file-organizer/actions/workflows/build-windows.yml/badge.svg)](https://github.com/TheronRadley/smart-file-organizer/actions/workflows/build-windows.yml)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](#requirements)
+[![Version](https://img.shields.io/badge/Version-0.1.0.dev0-6366F1)](CHANGELOG.md)
+[![License: Source-Available](https://img.shields.io/badge/License-Source--Available%20%C2%B7%20Free%2C%20No%20Sale-A855F7)](LICENSE)
+
+<br>
+
+[User Guide](docs/USER_GUIDE.md) · [Safety Guarantees](docs/SAFETY.md) · [Architecture](docs/ARCHITECTURE.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+
+</div>
+
+---
+
+## Why Smart File Organizer?
+
+Most organizers move first and explain later. This one is built the other way around:
+
+- **Preview before anything moves.** Scan a folder, inspect the exact plan, run a dry run, then apply only the moves you selected.
+- **Nothing is ever overwritten or deleted.** Collisions are renamed (`name (2).ext`) or skipped — your existing files are never replaced.
+- **Every move can be undone.** Batches are recorded in a local history and reversed only when every file is exactly where it was left; otherwise nothing changes and you are told why.
+- **Private by design.** Everything runs on your machine. No accounts, no network requests, no telemetry.
 
 ## Features
 
-- **Organize Files** — scan a folder, build a preview, run a dry run, then apply selected moves.
-  Sort by type (ten categories plus Other), extension, or modified month. Collisions are renamed
-  (`name (2).ext`) by default, or skipped. Existing files are never overwritten.
-- **Guarded undo** — a batch is reversed only if every file is still where it was organized and its
-  original location is free. Otherwise nothing changes and the reasons are shown.
-- **Duplicate Finder** — groups files by size, then partial and full SHA-256 hash. Reports
-  recoverable space. Never deletes anything.
-- **Large Files** — lists the biggest files above a size threshold, filterable by extension.
-  Flags results as incomplete if the scan was cancelled or some items could not be read.
-- **Automation** — watches chosen folders. Preview-first by default; automatic organization is an
-  explicit opt-in. Waits until files stop changing, handles each file once, and supports pause,
-  resume and stop.
-- **History** — every real operation is recorded with its outcome and reason (dry runs are not).
-  Clearing history never touches your files. Batches that did not finish cleanly come with
-  **recovery guidance**: where the file is now, and the safest next step.
-- **Reports** — export history, scan results and duplicate reports to CSV (UTF-8 with BOM, so
-  spreadsheets read non-ASCII paths) or JSON, for auditing and for keeping a record off the machine.
-- **Dashboard** — shows real results from your scans and history.
-- **Settings** — collision rule, organization method, category folder names, exclusions, extension
-  overrides, watch options, dark (default) or light theme.
-- **Safety by design** — symbolic links and junctions are never followed, destinations are validated
-  against Windows naming rules, and files are re-checked immediately before each move.
+| | |
+|---|---|
+| **Organize** | Sort by type (10 categories + Other), extension, or modified month — with per-file selection and collision handling |
+| **Duplicate Finder** | Groups identical files by size and SHA-256, reports recoverable space, and never deletes anything |
+| **Large Files** | Surfaces the biggest files above a threshold, with honest incomplete-result warnings |
+| **Automation** | Optional folder monitoring — preview-first by default, waits for files to finish copying, stop means stop |
+| **History & Recovery** | Full audit trail, guarded undo, and step-by-step guidance for batches interrupted mid-run |
+| **Reports** | Export history, scans, and duplicate reports to spreadsheet-safe CSV or JSON |
 
-Details: [User guide](docs/USER_GUIDE.md) · [Safety](docs/SAFETY.md) · [Architecture](docs/ARCHITECTURE.md)
+## Safety at a glance
 
-## Requirements
+- Symbolic links and Windows junctions are never followed
+- Source files are re-validated by identity immediately before each move
+- Exports refuse to silently overwrite an existing report
+- A stopped watcher moves nothing further — and never runs two workers
 
-- Windows 10 or 11 (the target platform; the test suite also runs on Linux and macOS)
-- Python 3.12 or newer, if running from source
-- No administrator rights are needed.
+The full guarantees, limits, and threat model live in **[docs/SAFETY.md](docs/SAFETY.md)**.
 
-## Install and run from source
+## Quick start
 
-PowerShell:
+**Requirements:** Windows 10 or 11 · Python 3.12+ (from source) · no administrator rights
 
 ```powershell
 git clone https://github.com/TheronRadley/smart-file-organizer.git
@@ -64,72 +69,50 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Equivalent on macOS/Linux: `python3.12 -m venv .venv && source .venv/bin/activate`, then the same
-`pip install` and `python app.py` commands.
+<sub>macOS/Linux equivalent: `python3.12 -m venv .venv && source .venv/bin/activate`, then the same `pip install` and `python app.py`. You can also `pip install .` to get the `smart-file-organizer` command.</sub>
 
-You can also run `python -m smart_file_organizer` from the `src` folder, or install the project
-with `python -m pip install .` to get the `smart-file-organizer` command.
-
-## Run the tests and linter
-
-```powershell
-python -m pip install -r requirements-dev.txt
-python -m pytest
-ruff check .
-ruff format --check .
-```
-
-The tests use temporary folders only. They never read or write your real files or settings.
-
-CI also runs a GUI startup smoke test on Windows (the unit tests never import tkinter) and
-audits the pinned dependencies for known vulnerabilities with `pip-audit`. Manual Windows
-checks that cannot be automated are listed in
-[docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md).
-
-## Build a Windows executable
+## Building the Windows executable
 
 ```powershell
 python -m pip install -r requirements-dev.txt
 pyinstaller --noconfirm --clean --windowed --name SmartFileOrganizer --paths src --collect-all customtkinter app.py
 ```
 
-The program is written to `dist\SmartFileOrganizer\SmartFileOrganizer.exe`. The
-`Windows build` GitHub Actions workflow runs the same command and uploads the folder as an artifact.
-The build has not yet been produced or tested on Windows (see [Known limitations](#known-limitations)).
+Output: `dist\SmartFileOrganizer\SmartFileOrganizer.exe` — the same command runs in the **Windows build** GitHub Actions workflow.
 
-## Where data is stored
+## Development
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest            # tests use temporary folders only — never your real files
+ruff check .
+ruff format --check .
+```
+
+CI additionally runs a Windows GUI startup smoke test and a `pip-audit` dependency audit. Manual checks that need a real Windows desktop are listed in [docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md).
+
+## Where your data lives
 
 | Item | Location |
-| --- | --- |
+|---|---|
 | Settings | `%APPDATA%\SmartFileOrganizer\settings.json` |
 | History | `%APPDATA%\SmartFileOrganizer\history.sqlite3` |
 | Log | `%APPDATA%\SmartFileOrganizer\app.log` |
 
-Set the `SFO_DATA_DIR` environment variable to use a different folder.
+Set `SFO_DATA_DIR` to use a different folder.
 
-## Privacy
+## Status
 
-Everything runs on your computer. The app makes no network requests, collects no telemetry, and
-does not read file contents to classify them (classification uses file names and extensions).
-
-## Known limitations
-
-- The GUI is exercised by an automated smoke test on a Windows runner (it opens every page, walks
-  the navigation and closes), so build and import errors are caught. Nobody has reviewed the layout
-  visually yet, and the manual checks in `docs/WINDOWS_SAFETY_CHECKLIST.md` have not been run.
-- Classification is by extension only; a misnamed file is organized by its extension.
-- A batch is applied one file at a time. If a move fails, the batch ends as *partial*; History shows which files moved.
-- Undo reverses moves only and refuses rather than guessing when anything has changed.
-- Folder monitoring polls (default every 5 seconds) and runs only while the app is open.
-- Images are not thumbnailed or previewed; metadata includes dimensions read from headers.
-- No installer, code signing, or published release exists yet.
-
-See [docs/SAFETY.md](docs/SAFETY.md) for the full list of guarantees and limits.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Early development (`0.1.0.dev0`) — no installer, code signing, or published release yet. The core logic is covered by an automated test suite on Windows, Linux, and macOS runners; the interface is smoke-tested in CI but has not yet had a full visual review, and the manual Windows safety checklist is still to be run. Honest, specific status — no surprises, just like the app.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+**Free to use, study, modify, and fork — never to sell, and never to pass off as your own.**
+
+Smart File Organizer is source-available under the [Smart File Organizer License](LICENSE). Anyone may use, copy, modify, and redistribute it free of charge with attribution. Selling it (or any fork of it), claiming authorship, impersonating the author, or using the name and logo to imply official status is prohibited.
+
+---
+
+<div align="center">
+<sub>Built with Python & CustomTkinter · Runs 100% locally · Your files stay yours</sub>
+</div>

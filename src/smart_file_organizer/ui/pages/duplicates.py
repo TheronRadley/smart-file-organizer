@@ -205,7 +205,8 @@ class DuplicatesPage(BasePage):
         if not path:
             return
         try:
-            written = write_export(duplicates_export(report), path)
+            # The native save dialog has already confirmed replacing an existing file.
+            written = write_export(duplicates_export(report), path, overwrite=True)
         except ExportError as exc:
             dialogs.error(self, "Could not export", str(exc))
             return

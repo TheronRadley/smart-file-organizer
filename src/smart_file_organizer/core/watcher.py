@@ -11,7 +11,10 @@ Design choices:
 * **No repeat processing.** Every handled file is remembered by
   (path, size, modification time). Files are only handled again if they change.
 * **Preview first.** Unless ``auto_apply`` is enabled, stable files are listed as
-  pending and nothing is moved until the user applies them.
+  pending and nothing is moved until the user applies them. Applying moves a
+  file only to the exact destination that was displayed: if a rebuilt plan
+  would send it somewhere else (for example because the shown destination was
+  taken meanwhile), the file is not moved and fresh approval is required.
 * **Same safety rules.** Monitoring uses the organizer, so exclusions, collision
   handling and revalidation apply exactly as in the Organize page.
 * **Stop means stop.** A stop request is propagated into the scan and into the
@@ -200,18 +203,47 @@ class FolderWatcher:
         return [self._apply(plan, stable, cancel)]
 
     def apply_pending(self) -> BatchOutcome | None:
-        """Apply the moves that were listed as pending, if they are still unchanged."""
+        """Apply the moves that were listed as pending, if they are still unchanged.
+
+        The rebuilt plan must reproduce the exact source -> destination mapping
+        that was displayed for approval. A file whose destination would differ
+        is left pending for renewed approval instead of being moved somewhere
+        the user never saw.
+        """
         with self._lock:
-            approved = set(self._state.pending_keys)
+            approved = {item.source: item.destination for item in self._state.pending}
         if not approved:
             return None
         scan = scan_folder(self.folder, self.config.scan_options)
         plan = self._build_plan(scan)
-        operations = [op for op in plan.ready if _key(op) in approved]
+        operations = []
+        drifted: list[PlannedOperation] = []
+        for operation in plan.ready:
+            if operation.source not in approved:
+                continue
+            (operations if operation.destination == approved[operation.source] else drifted).append(operation)
+        for operation in drifted:
+            self._log(
+                f"Destination for {operation.source.name} changed since it was shown; "
+                "it was not moved and needs fresh approval."
+            )
         if not operations:
-            self._log("Pending files changed or disappeared; nothing was moved.")
+            if not drifted:
+                self._log("Pending files changed or disappeared; nothing was moved.")
+            else:
+                # Show the new destinations; they were never approved.
+                with self._lock:
+                    self._state.pending = [PendingMove(op.source, op.destination, op.size) for op in drifted]
+                    self._state.pending_keys = {_key(op) for op in drifted}
             return None
-        return self._apply(plan, operations, self._current_stop_event())
+        outcome = self._apply(plan, operations, self._current_stop_event())
+        if drifted:
+            # _apply clears the pending list; restore the unapproved files with
+            # their new destinations so renewed approval is possible.
+            with self._lock:
+                self._state.pending = [PendingMove(op.source, op.destination, op.size) for op in drifted]
+                self._state.pending_keys = {_key(op) for op in drifted}
+        return outcome
 
     def _build_plan(self, scan: ScanResult) -> OrganizePlan:
         return build_plan(

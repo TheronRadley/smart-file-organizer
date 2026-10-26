@@ -8,7 +8,7 @@ version = "0.1.0.dev0"
 description = "Safe, previewable file organization, duplicate detection and undo for the desktop."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = { text = "LicenseRef-SmartFileOrganizer" }
 authors = [{ name = "TheronRadley" }]
 keywords = ["file organizer", "duplicates", "desktop", "customtkinter", "sqlite"]
 classifiers = [
@@ -17,7 +17,7 @@ classifiers = [
     "Environment :: MacOS X",
     "Environment :: X11 Applications",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",

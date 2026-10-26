@@ -7,6 +7,17 @@ chooses.
 CSV files are written as UTF-8 with a byte order mark, because spreadsheet
 applications otherwise assume a legacy encoding and mangle non-ASCII paths.
 JSON keeps the same rows plus a summary block.
+
+CSV cells are sanitized against spreadsheet formula injection: a cell whose
+first non-whitespace/control character is ``=``, ``+``, ``-`` or ``@`` is
+prefixed with an apostrophe so Excel/LibreOffice treat it as text, not a
+formula. CSV quoting alone would not prevent that. JSON is not sanitized,
+because it is not opened as a spreadsheet.
+
+Exports never silently replace an existing file. ``overwrite`` must be passed
+explicitly (the save dialog's own overwrite prompt is that confirmation in the
+UI); the report is written to a uniquely named temporary file in the target
+folder and published without clobbering a file that appears in the meantime.
 """
 
 from __future__ import annotations
@@ -15,6 +26,8 @@ import csv
 import json
 import logging
 import os
+import shutil
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -179,8 +192,14 @@ def duplicates_export(report: DuplicateReport) -> Export:
     )
 
 
-def write_export(export: Export, path: Path | str) -> Path:
-    """Write ``export`` to ``path``; the format comes from the file extension."""
+def write_export(export: Export, path: Path | str, *, overwrite: bool = False) -> Path:
+    """Write ``export`` to ``path``; the format comes from the file extension.
+
+    An existing target is never replaced silently: without ``overwrite=True``
+    the write is refused, including when another process creates the target
+    while the report is being written. Pass ``overwrite=True`` only after the
+    user has explicitly confirmed replacing that exact file.
+    """
     target = Path(path)
     suffix = target.suffix.lower()
     if suffix not in EXPORT_SUFFIXES:
@@ -188,28 +207,88 @@ def write_export(export: Export, path: Path | str) -> Path:
     if target.is_dir():
         # os.replace() would happily swap an empty folder for the report file.
         raise ExportError(f"'{target}' is a folder. Choose a file name to write the report to.")
-    temporary = target.with_suffix(target.suffix + ".tmp")
+    if not overwrite and os.path.lexists(target):
+        raise ExportError(
+            f"'{target.name}' already exists and was not changed. Choose another name, or confirm overwriting it."
+        )
+    temporary: Path | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        # A uniquely named temporary in the target folder: concurrent exports to
+        # the same target cannot corrupt each other through a shared ".tmp" file.
+        descriptor, temporary_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+        os.close(descriptor)
+        temporary = Path(temporary_name)
         if suffix == CSV_SUFFIX:
             _write_csv(export, temporary)
         else:
             _write_json(export, temporary)
-        os.replace(temporary, target)
+        if overwrite:
+            os.replace(temporary, target)
+            temporary = None
+        else:
+            try:
+                _publish_no_overwrite(temporary, target)
+            except FileExistsError as exc:
+                raise ExportError(
+                    f"'{target.name}' already exists and was not changed. "
+                    "Choose another name, or confirm overwriting it."
+                ) from exc
+            temporary = None
+    except ExportError:
+        raise
     except OSError as exc:
         # Cleaning up must never mask the real reason the export failed.
-        with suppress(OSError):
-            temporary.unlink(missing_ok=True)
         raise ExportError(f"Could not write '{target}': {exc.strerror or exc}") from exc
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
     logger.info("Exported %d %s row(s) to %s", len(export.rows), export.kind, target)
     return target
+
+
+def _publish_no_overwrite(temporary: Path, target: Path) -> None:
+    """Publish ``temporary`` as ``target`` only if ``target`` is still free.
+
+    A hard link is atomic: it fails with :class:`FileExistsError` instead of
+    replacing a file another process created meanwhile. Filesystems without
+    hard links fall back to an exclusive-create copy, which fails the same way.
+    """
+    try:
+        os.link(temporary, target)
+    except FileExistsError:
+        raise
+    except OSError:
+        with open(temporary, "rb") as source, open(target, "xb") as destination:
+            shutil.copyfileobj(source, destination)
+    temporary.unlink()
 
 
 def _write_csv(export: Export, path: Path) -> None:
     with open(path, "w", encoding=UTF8_BOM, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(export.columns), extrasaction="ignore", quoting=csv.QUOTE_ALL)
         writer.writeheader()
-        writer.writerows(export.rows)
+        writer.writerows({column: _csv_cell(row.get(column, "")) for column in export.columns} for row in export.rows)
+
+
+#: Characters a spreadsheet treats as the start of a formula in the first cell position.
+_FORMULA_STARTERS = ("=", "+", "-", "@")
+
+
+def _csv_cell(value: Any) -> Any:
+    """Neutralize a string cell that a spreadsheet would execute as a formula.
+
+    Detection skips leading whitespace and control characters (including tab
+    and newline tricks); the apostrophe is prefixed to the original value so
+    no filename characters are lost. Non-strings (sizes, counts) pass through.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    stripped = value.lstrip("".join(chr(code) for code in range(0x21)) + "\u00ad\ufeff")
+    if stripped[:1] in _FORMULA_STARTERS:
+        return "'" + value
+    return value
 
 
 def _write_json(export: Export, path: Path) -> None:

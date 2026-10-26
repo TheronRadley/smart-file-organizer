@@ -210,7 +210,8 @@ class HistoryPage(BasePage):
         if not path:
             return
         try:
-            written = write_export(history_export(self.ctx.history), path)
+            # The native save dialog has already confirmed replacing an existing file.
+            written = write_export(history_export(self.ctx.history), path, overwrite=True)
         except ExportError as exc:
             dialogs.error(self, "Could not export", str(exc))
             return

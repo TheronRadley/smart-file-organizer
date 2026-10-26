@@ -328,3 +328,29 @@ def test_manager_passes_the_stop_timeout_on(
     manager.remove(workspace, timeout=0.5)
 
     assert seen == [0.25, 0.5]
+
+
+def test_apply_pending_refuses_a_destination_the_user_never_saw(
+    workspace: Path, options: ScanOptions, history: HistoryRepository
+) -> None:
+    clock = FakeClock(1_700_000_000)
+    watcher = _watcher(workspace, False, options, history, clock)
+    make_file(workspace / "one.pdf", mtime=int(clock.now))
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    assert [str(p.destination) for p in watcher.pending] == [str(workspace / "Documents" / "one.pdf")]
+
+    # Another program takes the shown destination: a rebuilt plan would now
+    # pick "one (2).pdf", which the user never approved.
+    make_file(workspace / "Documents" / "one.pdf", b"someone else")
+
+    assert watcher.apply_pending() is None
+    assert (workspace / "one.pdf").exists(), "the file must not move to an unapproved destination"
+    assert not (workspace / "Documents" / "one (2).pdf").exists()
+    assert history.list_batches() == []
+    # The new destination is shown for renewed approval, and only then applied.
+    assert [p.destination.name for p in watcher.pending] == ["one (2).pdf"]
+    outcome = watcher.apply_pending()
+    assert outcome is not None and outcome.success_count == 1
+    assert (workspace / "Documents" / "one (2).pdf").exists()

@@ -1,21 +1,73 @@
-MIT License
+Smart File Organizer — Source-Available License
 
-Copyright (c) 2026 TheronRadley
+Copyright (c) 2026 TheronRadley. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This is a source-available license, not an OSI-approved open-source license.
+In short: you may use, study, modify, and fork this project for free — but you
+may never sell it, and you may never claim it as your own work.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Permission
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+   Subject to the terms below, anyone is granted permission, free of charge, to:
+
+   a. Use the software, unmodified or modified, for personal, educational,
+      research, or internal business purposes;
+   b. Copy, modify, and fork the source code;
+   c. Redistribute verbatim or modified copies, in source or compiled form,
+      provided every redistribution is offered entirely free of charge and
+      includes this license and the original copyright notice.
+
+2. Restrictions
+
+   You may NOT:
+
+   a. Sell, rent, lease, sublicense for a fee, or otherwise charge any price
+      or receive payment for the software or any modified, forked, combined,
+      or derivative version of it — whether as a standalone product, a paid
+      download, or a paid service whose value substantially derives from it;
+   b. Claim, expressly or by implication, that you wrote the original
+      software, or remove, alter, or obscure any copyright, author, or
+      license notice contained in it;
+   c. Impersonate the original author (TheronRadley), or present yourself,
+      your account, or your organization as the author, maintainer, or
+      official source of the original project;
+   d. Use the name "Smart File Organizer", the project's logo, or the
+      author's name to endorse, market, or imply official status for a fork
+      or any other product, without prior written permission from the author.
+      A fork must carry a clearly different name and must state that it is an
+      independent, unofficial fork;
+   e. Distribute the software in a way that suggests the author endorses you
+      or your distribution.
+
+3. Attribution
+
+   Every redistribution must give visible credit to the original project and
+   author, including the project name "Smart File Organizer", the author's
+   name (TheronRadley), and a link to the original repository where reasonably
+   possible.
+
+4. Trademarks and identity
+
+   This license grants no rights to the project's name, logo, or branding,
+   except the factual attribution required by section 3.
+
+5. Contributions
+
+   By submitting a contribution to the original project, you grant the author
+   permission to use, modify, and distribute that contribution as part of the
+   project under this license.
+
+6. Termination
+
+   Any breach of section 2 automatically terminates your permission under
+   this license. Continued use after a breach requires the author's prior
+   written consent.
+
+7. No warranty
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+   THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+   IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
