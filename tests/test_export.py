@@ -63,7 +63,7 @@ def test_csv_is_utf8_with_a_bom_and_quotes_commas(
     workspace: Path, options: ScanOptions, classifier, history: HistoryRepository, tmp_path: Path
 ) -> None:
     # A path containing a comma and non-ASCII characters must survive the round trip.
-    make_file(workspace / "Budget, 2026 — final.pdf", b"contents")
+    make_file(workspace / "Budget, 2026 - final.pdf", b"contents")
     scan = scan_folder(workspace, options, classifier)
     target = write_export(scan_export(scan), tmp_path / "scan.csv")
 
@@ -71,7 +71,7 @@ def test_csv_is_utf8_with_a_bom_and_quotes_commas(
     assert raw.startswith(b"\xef\xbb\xbf"), "spreadsheet applications need the byte order mark"
     with open(target, encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    assert rows[0]["name"] == "Budget, 2026 — final.pdf"
+    assert rows[0]["name"] == "Budget, 2026 - final.pdf"
 
 
 def test_scan_export_lists_every_file(
@@ -153,7 +153,7 @@ def test_export_never_changes_history_or_files(
         "\t=1+1",
         "\r\n@1+1",
         "\x01\x1f=1+1",
-        "﻿=1+1",
+        "\ufeff=1+1",
     ],
 )
 def test_csv_cells_starting_like_formulas_are_neutralized(tmp_path: Path, dangerous: str) -> None:

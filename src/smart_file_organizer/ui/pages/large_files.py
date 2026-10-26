@@ -115,7 +115,7 @@ class LargeFilesPage(BasePage):
                 [
                     entry.name,
                     format_size(entry.size),
-                    entry.extension or "—",
+                    entry.extension or "-",
                     format_ns_timestamp(entry.modified_ns),
                     location,
                 ],

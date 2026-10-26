@@ -37,7 +37,7 @@ class Card(ctk.CTkFrame):
 class StatCard(Card):
     """Single metric with a caption. ``value`` may be updated later."""
 
-    def __init__(self, master: Any, caption: str, value: str = "—") -> None:
+    def __init__(self, master: Any, caption: str, value: str = "-") -> None:
         super().__init__(master)
         self._value = ctk.CTkLabel(self, text=value, font=ctk.CTkFont(size=22, weight="bold"), text_color=theme.TEXT)
         self._value.pack(anchor="w", padx=16, pady=(12, 0))
@@ -200,7 +200,7 @@ class BarChart(ctk.CTkFrame):
         bar = "#e6e6e6" if dark else "#2a2a2a"
         width = max(canvas.winfo_width(), 300)
         if not self._data:
-            canvas.create_text(12, 20, anchor="w", fill=muted, text="No categories yet — run a scan first.")
+            canvas.create_text(12, 20, anchor="w", fill=muted, text="No categories yet - run a scan first.")
             return
         label_width = 140
         count_width = 90

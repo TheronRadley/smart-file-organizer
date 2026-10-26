@@ -61,8 +61,8 @@ class AboutPage(BasePage):
         )
         muted_label(
             docs,
-            "docs/USER_GUIDE.md — step-by-step usage\n"
-            "docs/SAFETY.md — guarantees and what to do after a partial failure\n"
-            "docs/ARCHITECTURE.md — how the code is organized",
+            "docs/USER_GUIDE.md - step-by-step usage\n"
+            "docs/SAFETY.md - guarantees and what to do after a partial failure\n"
+            "docs/ARCHITECTURE.md - how the code is organized",
             wraplength=900,
         ).pack(anchor="w", padx=16, pady=(0, 14))

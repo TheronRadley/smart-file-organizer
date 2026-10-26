@@ -231,13 +231,13 @@ class HistoryPage(BasePage):
 
 
 def _operation_row(operation: OperationRecord) -> list[str]:
-    undo = operation.undo_status or ("—" if operation.op_type == OP_CREATE_FOLDER else "not undone")
+    undo = operation.undo_status or ("-" if operation.op_type == OP_CREATE_FOLDER else "not undone")
     return [
         format_timestamp(operation.created_at),
         operation.op_type.replace("_", " "),
-        operation.source_path or "—",
-        operation.destination_path or "—",
-        format_size(operation.size_bytes) if operation.size_bytes is not None else "—",
+        operation.source_path or "-",
+        operation.destination_path or "-",
+        format_size(operation.size_bytes) if operation.size_bytes is not None else "-",
         operation.status.title(),
         undo.replace("_", " ").title(),
         operation.error or operation.undo_error or "",

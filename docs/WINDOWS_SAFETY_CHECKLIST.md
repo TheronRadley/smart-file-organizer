@@ -39,7 +39,7 @@ without hard-link support, and killing the application mid-operation.
       operations are marked `interrupted`, and **Recovery guidance…** on the History page
       names, for each one, where the file is and what to do next.
 - [ ] Verify no file was lost: every file is at its original location, its new location, or
-      both — and never nowhere.
+      both - and never nowhere.
 
 ## 3. Occupied destinations
 
