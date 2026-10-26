@@ -65,6 +65,55 @@ def ensure_within(path: Path | str, root: Path | str) -> Path:
     return Path(path)
 
 
+def _system_roots() -> tuple[Path, ...]:
+    """Directories that must never be organized, watched, or scanned for moves."""
+    if os.name == "nt":
+        drive = os.environ.get("SYSTEMDRIVE", "C:")
+        candidates = [
+            os.environ.get("SYSTEMROOT", rf"{drive}\Windows"),
+            os.environ.get("PROGRAMFILES", rf"{drive}\Program Files"),
+            os.environ.get("PROGRAMFILES(X86)", rf"{drive}\Program Files (x86)"),
+            os.environ.get("PROGRAMDATA", rf"{drive}\ProgramData"),
+        ]
+    else:
+        candidates = [
+            "/etc",
+            "/private/etc",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/boot",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/System",
+            "/Library",
+        ]
+    return tuple(Path(candidate) for candidate in candidates if candidate)
+
+
+def protected_root_reason(path: Path | str) -> str | None:
+    """Return why ``path`` is a protected location, or None when it is not.
+
+    A location is protected when it is a filesystem or drive root, or when it
+    is (or is inside) an operating-system directory. Organizing, watching, or
+    duplicate-scanning such a location could move system files, so every entry
+    point that scans a user-selected root refuses it. User folders such as
+    Documents, Downloads, or a temporary test folder are never protected.
+    """
+    candidate = Path(os.path.abspath(os.fspath(path)))
+    if candidate.parent == candidate:
+        return "a drive or filesystem root"
+    resolved = normalise(candidate)
+    for system_root in _system_roots():
+        protected = normalise(system_root)
+        if resolved == protected or resolved.startswith(protected.rstrip(os.sep) + os.sep):
+            return f"the system folder '{system_root}'"
+    return None
+
+
 def is_link_like(path: Path | str) -> bool:
     """True for symbolic links and (on Windows) junctions."""
     if os.path.islink(path):

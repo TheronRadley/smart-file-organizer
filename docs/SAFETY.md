@@ -57,6 +57,11 @@ what it does not, and what to do when something goes wrong.
     shell commands built from file names.
 14. **Privacy.** No network access, no telemetry, no cloud services and no reading of file
     contents for classification (see the README privacy statement).
+15. **System locations are protected.** A drive or filesystem root, and any folder inside an
+    operating-system directory (for example `C:\Windows`, `C:\Program Files`, `/etc`, `/usr`),
+    is refused as a scan root. Because Organize, Duplicate Finder, Large Files, and Automation
+    all scan through the same entry point, the refusal applies everywhere - a protected folder
+    cannot be organized, watched, or duplicate-scanned. Ordinary user folders are unaffected.
 
 ## Limitations
 
@@ -65,6 +70,12 @@ what it does not, and what to do when something goes wrong.
   and each file is independently recorded.
 - **Classification is by extension only.** A file named `invoice.jpg` that is really a PDF
   is classified as an image. The tool does not inspect contents to decide.
+- **Cross-volume moves.** Organization destinations are always inside the selected folder, so
+  moves are same-volume by construction. If a filesystem operation nevertheless reports a
+  cross-device error (or hard links are unavailable), the move fails and the source is left
+  exactly where it was: the source is only ever removed after the destination link has been
+  created and verified to be the same file object, so an interrupted or impossible move cannot
+  strand a file between volumes.
 - **Filesystems without hard-link or file-ID support.** On POSIX volumes that do not support
   hard links (for example some FAT32, exFAT or network mounts), `move_no_overwrite` refuses
   the move and leaves the source in place rather than falling back to `os.rename`, which on
