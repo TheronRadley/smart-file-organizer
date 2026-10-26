@@ -216,9 +216,7 @@ def write_export(export: Export, path: Path | str, *, overwrite: bool = False) -
         target.parent.mkdir(parents=True, exist_ok=True)
         # A uniquely named temporary in the target folder: concurrent exports to
         # the same target cannot corrupt each other through a shared ".tmp" file.
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
-        )
+        descriptor, temporary_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
         os.close(descriptor)
         temporary = Path(temporary_name)
         if suffix == CSV_SUFFIX:

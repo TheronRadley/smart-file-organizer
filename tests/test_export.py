@@ -149,7 +149,7 @@ def test_export_never_changes_history_or_files(
         "+2+5",
         "-2+5",
         "@SUM(1+1)",
-        "  =HYPERLINK(\"https://example.invalid\")",
+        '  =HYPERLINK("https://example.invalid")',
         "\t=1+1",
         "\r\n@1+1",
         "\x01\x1f=1+1",
