@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="168" viewBox="0 0 760 168" fill="none" role="img" aria-labelledby="title">
+  <title id="title">Smart File Organizer</title>
+  <defs>
+    <linearGradient id="mark" x1="16" y1="16" x2="136" y2="144" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="0.52" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="32" y1="28" x2="120" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Mark: a folder resolved into three organized files -->
+  <g>
+    <rect x="14" y="18" width="132" height="132" rx="34" fill="url(#mark)"/>
+    <rect x="14" y="18" width="132" height="132" rx="34" fill="url(#shine)"/>
+    <path d="M42 62.5C42 57.7 45.9 53.8 50.7 53.8H68.4L78.6 64H109.3C114.1 64 118 67.9 118 72.7V105.3C118 110.1 114.1 114 109.3 114H50.7C45.9 114 42 110.1 42 105.3V62.5Z" fill="#FFFFFF" fill-opacity="0.96"/>
+    <rect x="55" y="76" width="21" height="5.5" rx="2.75" fill="#38BDF8"/>
+    <rect x="55" y="87" width="31" height="5.5" rx="2.75" fill="#6366F1"/>
+    <rect x="55" y="98" width="25" height="5.5" rx="2.75" fill="#A855F7"/>
+    <circle cx="97" cy="79" r="3.4" fill="#38BDF8"/>
+    <circle cx="97" cy="90" r="3.4" fill="#6366F1"/>
+    <circle cx="97" cy="101" r="3.4" fill="#A855F7"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text fill="#F8FAFC" x="172" y="78" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="43" font-weight="700" letter-spacing="-1.2">Smart File Organizer</text>
+  <text fill="#94A3B8" x="174" y="110" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="15.5" font-weight="500" letter-spacing="3.2">ORGANIZE · PREVIEW · UNDO</text>
+</svg>
