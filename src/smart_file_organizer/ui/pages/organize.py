@@ -164,7 +164,8 @@ class OrganizePage(BasePage):
         if not path:
             return
         try:
-            written = write_export(scan_export(scan), path)
+            # The native save dialog has already confirmed replacing an existing file.
+            written = write_export(scan_export(scan), path, overwrite=True)
         except ExportError as exc:
             dialogs.error(self, "Could not export", str(exc))
             return

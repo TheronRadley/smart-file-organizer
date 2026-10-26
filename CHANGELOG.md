@@ -6,6 +6,18 @@ aims to follow [Semantic Versioning](https://semver.org/) once it has its first 
 
 ## [Unreleased]
 
+### Security (2026-10-26 audit)
+- **CSV exports can no longer smuggle spreadsheet formulas.** Cells whose first
+  non-whitespace/control character is `=`, `+`, `-` or `@` (including tab/newline/BOM-prefixed
+  variants) are apostrophe-prefixed so Excel/LibreOffice open them as text; JSON is unchanged.
+- **Exports never silently replace an existing report.** `write_export` refuses an existing
+  target unless `overwrite=True` is passed (the native save dialog is that confirmation in the
+  UI), writes to a uniquely named temporary file (no shared `.tmp` collisions between concurrent
+  exports), and publishes without clobbering a target created during the write.
+- **Watcher "Apply Pending" now moves only the exact mapping that was approved.** If a rebuilt
+  plan would send a file to a different destination than the one displayed, that file is not
+  moved; its new destination is shown for renewed approval.
+
 ### Added
 - Desktop interface (CustomTkinter) with Dashboard, Organize Files, Duplicate Finder,
   Large Files, Automation, History, Settings and About pages.

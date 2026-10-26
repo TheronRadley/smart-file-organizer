@@ -137,3 +137,88 @@ def test_export_never_changes_history_or_files(
     assert [(batch.id, batch.status) for batch in history.list_batches()] == before
     assert (workspace / "Documents" / "report.pdf").read_bytes() == b"contents"
     assert not list((tmp_path).glob("*.tmp")), "no temporary export file may be left behind"
+
+
+# ----- spreadsheet formula injection (audit P0) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "dangerous",
+    [
+        "=2+5+cmd|' /C calc'!A0",
+        "+2+5",
+        "-2+5",
+        "@SUM(1+1)",
+        "  =HYPERLINK(\"https://example.invalid\")",
+        "\t=1+1",
+        "\r\n@1+1",
+        "\x01\x1f=1+1",
+        "﻿=1+1",
+    ],
+)
+def test_csv_cells_starting_like_formulas_are_neutralized(tmp_path: Path, dangerous: str) -> None:
+    from smart_file_organizer.core.export import Export
+
+    export = Export(kind="scan", columns=("name",), rows=({"name": dangerous},), summary={})
+    target = write_export(export, tmp_path / "scan.csv")
+
+    with open(target, encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["name"] == "'" + dangerous, "the cell must be forced to text, with no characters lost"
+
+
+@pytest.mark.parametrize("safe", ["normal.pdf", "a=b.pdf", "", "2026-01-01 notes.pdf"])
+def test_csv_cells_that_are_not_formulas_are_unchanged(tmp_path: Path, safe: str) -> None:
+    from smart_file_organizer.core.export import Export
+
+    export = Export(kind="scan", columns=("name",), rows=({"name": safe},), summary={})
+    target = write_export(export, tmp_path / "scan.csv")
+    with open(target, encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["name"] == safe
+
+
+def test_json_export_is_not_formula_sanitized(tmp_path: Path) -> None:
+    from smart_file_organizer.core.export import Export
+
+    export = Export(kind="scan", columns=("name",), rows=({"name": "=1+1"},), summary={})
+    target = write_export(export, tmp_path / "scan.json")
+    assert json.loads(target.read_text(encoding="utf-8"))["rows"][0]["name"] == "=1+1"
+
+
+# ----- no silent overwrite (audit P0) --------------------------------------
+
+
+def test_existing_export_target_is_never_replaced_silently(tmp_path: Path, history: HistoryRepository) -> None:
+    target = tmp_path / "history.csv"
+    target.write_text("previous report", encoding="utf-8")
+    with pytest.raises(ExportError, match="already exists"):
+        write_export(history_export(history), target)
+    assert target.read_text(encoding="utf-8") == "previous report"
+
+
+def test_explicit_overwrite_replaces_the_target(tmp_path: Path, history: HistoryRepository) -> None:
+    target = tmp_path / "history.csv"
+    target.write_text("previous report", encoding="utf-8")
+    write_export(history_export(history), target, overwrite=True)
+    assert "previous report" not in target.read_text(encoding="utf-8-sig")
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_target_created_during_the_write_is_not_replaced(
+    tmp_path: Path, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.core import export as export_module
+
+    target = tmp_path / "history.csv"
+    real_write_csv = export_module._write_csv
+
+    def write_then_compete(export, path) -> None:
+        real_write_csv(export, path)
+        target.write_text("written by another process", encoding="utf-8")
+
+    monkeypatch.setattr(export_module, "_write_csv", write_then_compete)
+    with pytest.raises(ExportError, match="already exists"):
+        write_export(history_export(history), target)
+    assert target.read_text(encoding="utf-8") == "written by another process"
+    assert not list(tmp_path.glob("*.tmp")), "no temporary export file may be left behind"
