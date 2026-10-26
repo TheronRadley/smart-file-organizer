@@ -22,7 +22,7 @@ from smart_file_organizer.core.models import (
     ScanProgress,
     ScanResult,
 )
-from smart_file_organizer.utils.paths import is_link_like, is_within
+from smart_file_organizer.utils.paths import is_link_like, is_within, protected_root_reason
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,12 @@ def scan_folder(
     symbolic link. Errors inside the tree are collected as ``issues`` instead.
     """
     root_path = Path(os.path.abspath(os.fspath(root)))
+    protected = protected_root_reason(root_path)
+    if protected is not None:
+        raise ScanError(
+            f"'{root_path}' is {protected}, which is protected. "
+            "Choose a user folder such as Documents or Downloads instead."
+        )
     if is_link_like(root_path):
         raise ScanError(f"'{root_path}' is a symbolic link. Choose the real folder instead.")
     if not root_path.is_dir():

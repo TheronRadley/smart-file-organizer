@@ -6,6 +6,18 @@ aims to follow [Semantic Versioning](https://semver.org/) once it has its first 
 
 ## [Unreleased]
 
+### Safety (2026-10-26 audit and roadmap)
+- **Protected locations are refused as scan roots.** Drive/filesystem roots and operating-system
+  folders (such as `C:\Windows`, `C:\Program Files`, `/etc`, `/usr`) can no longer be organized,
+  watched, or duplicate-scanned; the refusal applies through the single scan entry point shared
+  by every feature. Ordinary user folders are unaffected.
+- **Adversarial integration test suite** (`tests/test_adversarial_safety.py`): destination folder
+  swapped for an escaping symlink after preview, competing process creating the planned
+  destination, simulated cross-volume failure, hard-linked names, seeded property-style
+  collision-name checks, and protected-root checks. Expected outcome everywhere: no overwrite,
+  no deletion, no escape from the selected root.
+- CI now also runs the test matrix on macOS (in addition to Windows and Linux).
+
 ### Security (2026-10-26 audit)
 - **CSV exports can no longer smuggle spreadsheet formulas.** Cells whose first
   non-whitespace/control character is `=`, `+`, `-` or `@` (including tab/newline/BOM-prefixed
