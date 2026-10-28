@@ -29,6 +29,7 @@ from smart_file_organizer.core.models import (
     BatchRecord,
     OperationRecord,
 )
+from smart_file_organizer.core.operation_guard import operation_lock
 from smart_file_organizer.core.scanner import describe_os_error, file_identity
 from smart_file_organizer.utils.paths import is_link_like, is_within
 
@@ -149,8 +150,17 @@ def undo_batch(batch_id: str, history: HistoryRepository) -> UndoResult:
     """Reverse a batch if it is safe to do so. Refuses (changing nothing) otherwise.
 
     Individual moves are re-checked just before they run, so a file changed
-    during the undo is reported instead of being overwritten.
+    during the undo is reported instead of being overwritten. The batch root
+    is locked against concurrent organize/watch operations for the duration.
     """
+    preview_root = preview_undo(batch_id, history).batch.root_path
+    with operation_lock(preview_root) as acquired:
+        if not acquired:
+            raise UndoError("Another file operation is already running for this folder; undo changed nothing.")
+        return _undo_batch_locked(batch_id, history)
+
+
+def _undo_batch_locked(batch_id: str, history: HistoryRepository) -> UndoResult:
     preview = preview_undo(batch_id, history)
     if not preview.items:
         raise UndoError("Every move in this batch has already been reversed.")

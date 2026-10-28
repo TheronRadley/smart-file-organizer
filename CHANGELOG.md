@@ -6,6 +6,30 @@ aims to follow [Semantic Versioning](https://semver.org/) once it has its first 
 
 ## [Unreleased]
 
+### Safety (2026-10-28 audit)
+- **Source-replacement races closed in `move_no_overwrite`.** The linked destination is verified
+  against the validated file (identity, size, and timestamp, which also catches inode reuse), and
+  the source path is re-verified immediately before its name is removed, so a file replaced at
+  any stage is never the file that gets unlinked or moved. A failed rollback cleanup is now
+  always reported with both paths and recovery instructions, never silently suppressed.
+- **Destination-folder swap fails closed.** The organizer re-checks destination containment
+  after journaling and immediately before each move, so a folder swapped for a symlink or
+  junction at any earlier point cannot be written through.
+- **Shutdown is safe.** Closing the window cancels background tasks and waits for workers to
+  finish before the history database is released; if a worker cannot finish in time, the window
+  stays open. A database failure after a successful move leaves the operation pending, so the
+  completed move is reconciled and recoverable on the next start instead of vanishing.
+- **Automation approvals are identity-bound.** Pending moves now record size, modification time,
+  and file identity; "Apply Pending" refuses a same-name replacement even with identical size
+  and timestamps. Watcher errors survive until a genuinely successful poll, folder identity is
+  normalized (one watcher per folder however the path is spelled), a watcher that is still
+  stopping is not discarded, and manual, undo, and automation operations share a per-folder
+  lock so they cannot modify the same tree concurrently.
+- **Partial exports are cleaned up.** If the no-overwrite publication copy fails halfway, the
+  incomplete destination is removed and the failure is reported. NaN and infinity are rejected
+  in numeric settings and UI inputs, and duplicate-scan cancellation is now checked between
+  hashing chunks, not just between files.
+
 ### Safety (2026-10-26 audit and roadmap)
 - **Protected locations are refused as scan roots.** Drive/filesystem roots and operating-system
   folders (such as `C:\Windows`, `C:\Program Files`, `/etc`, `/usr`) can no longer be organized,

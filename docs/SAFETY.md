@@ -89,6 +89,25 @@ what it does not, and what to do when something goes wrong.
   (default five seconds). Monitoring runs only while the application is open.
 - **Hidden and temporary files are excluded by default** (`.*`, `*.tmp`, `*.part`,
   `*.crdownload`, `~$*`, `desktop.ini`, `Thumbs.db`). You can change these in Settings.
+- **Identity has limits.** Files are identified by device and inode together with size and
+  modification time. A replacement that reuses the same inode *and* reproduces the same size
+  and timestamp cannot be distinguished from the original by metadata; no check in this (or
+  any) tool can detect that without hashing file contents. Deterministic race tests cover
+  replacements before linking, after linking, and before unlinking, including inode reuse
+  with differing size or timestamp.
+- **Stop and Close are cooperative.** Cancellation is observed between files and between
+  hashing chunks. A single filesystem operation already in progress (one file's move, one
+  read) may finish; no further files are started afterwards. Closing the window cancels all
+  background tasks and waits for workers to finish before the database is released; if a
+  worker cannot finish in time, the window stays open rather than closing underneath it.
+- **Concurrency inside the app is coordinated.** Manual organization, undo, and watcher
+  batches share a per-folder lock; a second operation on the same folder is refused (or its
+  files are skipped) instead of racing a half-moved tree. This does not coordinate other
+  programs, which is what the identity re-validation at each move is for.
+- **A failed history write does not hide a completed move.** Moves are journaled as pending
+  before they run. If recording the outcome fails (for example a locked database), the file
+  stays moved, the result is reported to the user, and the still-pending record is marked
+  interrupted on the next start so Recovery guidance can locate the file.
 
 ## If something goes wrong
 

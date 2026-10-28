@@ -186,3 +186,67 @@ def test_open_read_no_follow_reports_the_handle_it_opened(workspace: Path) -> No
         assert handle.read() == b"content"
         assert stats.st_size == len(b"content")
         assert file_identity(stats, path) == file_identity(os.lstat(path), path)
+
+
+# ----- deterministic source-replacement races (audit P0) -------------------
+
+
+def test_source_replaced_between_link_and_unlink_is_never_deleted(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_file(workspace / "source.txt", b"validated payload")
+    destination = workspace / "Documents" / "source.txt"
+    destination.parent.mkdir()
+    real_link = os.link
+
+    def link_then_replace(src, dst, *args, **kwargs):
+        real_link(src, dst)
+        # Another process replaces the source path after the link exists.
+        os.unlink(src)
+        Path(src).write_bytes(b"unrelated replacement")
+
+    monkeypatch.setattr(fileops.os, "link", link_then_replace)
+
+    with pytest.raises(MoveRollbackError) as info:
+        move_no_overwrite(source, destination)
+
+    assert source.read_bytes() == b"unrelated replacement", "the replacement must never be unlinked"
+    assert destination.read_bytes() == b"validated payload", "the only remaining copy of the validated file is kept"
+    assert str(source) in info.value.recovery and str(destination) in info.value.recovery
+
+
+def test_source_replaced_before_link_is_not_moved(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_file(workspace / "source.txt", b"validated payload")
+    destination = workspace / "Documents" / "source.txt"
+    destination.parent.mkdir()
+    real_link = os.link
+
+    def replace_then_link(src, dst, *args, **kwargs):
+        os.unlink(src)
+        Path(src).write_bytes(b"replacement")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(fileops.os, "link", replace_then_link)
+
+    with pytest.raises(SourceChangedError):
+        move_no_overwrite(source, destination)
+
+    assert source.read_bytes() == b"replacement"
+    assert not destination.exists(), "the link to the unvalidated replacement must be rolled back"
+
+
+def test_failed_rollback_cleanup_is_reported_with_both_paths(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_file(workspace / "source.txt", b"payload")
+    destination = workspace / "Documents" / "source.txt"
+    destination.parent.mkdir()
+
+    def always_fail_unlink(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(fileops.os, "unlink", always_fail_unlink)
+
+    with pytest.raises(MoveRollbackError) as info:
+        move_no_overwrite(source, destination)
+
+    assert destination.exists(), "the un-removable extra link stays, and must be reported, not silently suppressed"
+    assert str(source) in info.value.recovery and str(destination) in info.value.recovery

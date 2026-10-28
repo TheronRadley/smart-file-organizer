@@ -145,3 +145,11 @@ def test_malformed_settings_cannot_crash_a_scan(tmp_path: Path, workspace: Path)
     )
     assert [entry.name for entry in scan.entries] == ["report.pdf"]
     assert scan.issues == []
+
+
+def test_non_finite_numeric_settings_fall_back_to_defaults() -> None:
+    from smart_file_organizer.config import settings_from_dict
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        settings = settings_from_dict({"large_file_min_mb": bad})
+        assert settings.large_file_min_mb == 100.0, f"{bad} must not be accepted as a setting"

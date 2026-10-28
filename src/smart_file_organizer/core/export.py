@@ -23,6 +23,7 @@ folder and published without clobbering a file that appears in the meantime.
 from __future__ import annotations
 
 import csv
+import errno
 import json
 import logging
 import os
@@ -260,8 +261,24 @@ def _publish_no_overwrite(temporary: Path, target: Path) -> None:
     except FileExistsError:
         raise
     except OSError:
-        with open(temporary, "rb") as source, open(target, "xb") as destination:
-            shutil.copyfileobj(source, destination)
+        # Exclusive-create copy. If the copy fails halfway (disk full, target
+        # removed), the incomplete destination this call created is removed:
+        # a partial report must never sit at the target looking complete.
+        created = False
+        try:
+            with open(temporary, "rb") as source, open(target, "xb") as destination:
+                created = True
+                shutil.copyfileobj(source, destination)
+        except BaseException:
+            if created:
+                try:
+                    target.unlink()
+                except OSError as cleanup_exc:
+                    raise OSError(
+                        errno.EIO,
+                        f"Incomplete export could not be removed; delete '{target}' manually",
+                    ) from cleanup_exc
+            raise
     temporary.unlink()
 
 

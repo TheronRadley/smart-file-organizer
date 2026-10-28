@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -143,7 +144,7 @@ def _validated(name: str, value: Any, default: Any) -> Any:
     if isinstance(default, float):
         if isinstance(value, bool):
             return _reject(name, value)
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float)) and math.isfinite(value):
             return float(value)
         return _reject(name, value)
     if isinstance(default, str):

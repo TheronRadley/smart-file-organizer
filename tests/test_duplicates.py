@@ -143,3 +143,17 @@ def test_file_changing_while_hashed_is_excluded(
     report = find_duplicates(workspace, recursive_options)
     assert report.groups == ()
     assert any("Changed while being compared" in issue.message for issue in report.issues)
+
+
+def test_hashing_stops_promptly_when_cancelled_mid_file(workspace: Path, options: ScanOptions) -> None:
+    import threading
+
+    from smart_file_organizer.core.duplicates import _HashCancelled, hash_file
+    from smart_file_organizer.core.scanner import scan_folder
+
+    make_file(workspace / "big.bin", b"x" * (3 * 1024 * 1024))
+    entry = scan_folder(workspace, options).entries[0]
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(_HashCancelled):
+        hash_file(entry, cancel_event=cancel)
