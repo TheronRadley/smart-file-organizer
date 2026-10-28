@@ -222,3 +222,26 @@ def test_target_created_during_the_write_is_not_replaced(
         write_export(history_export(history), target)
     assert target.read_text(encoding="utf-8") == "written by another process"
     assert not list(tmp_path.glob("*.tmp")), "no temporary export file may be left behind"
+
+
+def test_partial_copy_during_publication_is_removed_and_reported(
+    tmp_path: Path, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.core import export as export_module
+
+    def fail_link(source, destination, *args, **kwargs):
+        raise OSError(18, "Invalid cross-device link")
+
+    def copy_halfway(source_handle, destination_handle, *args, **kwargs):
+        destination_handle.write(b"partial report")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(export_module.os, "link", fail_link)
+    monkeypatch.setattr(export_module.shutil, "copyfileobj", copy_halfway)
+    target = tmp_path / "history.csv"
+    with pytest.raises(ExportError, match="Could not write"):
+        write_export(history_export(history), target)
+    assert not target.exists(), "an incomplete report must not be left at the target"
+    assert not list(tmp_path.glob("*.tmp")) and not list(tmp_path.glob(".*.tmp")), (
+        "no temporary or partial export file may be left behind"
+    )

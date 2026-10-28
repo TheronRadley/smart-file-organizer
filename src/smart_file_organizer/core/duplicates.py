@@ -115,7 +115,11 @@ def find_duplicates(
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True
                 break
-            digest = _hash_or_none(entry, PARTIAL_HASH_BYTES, issues)
+            try:
+                digest = _hash_or_none(entry, PARTIAL_HASH_BYTES, issues, cancel_event)
+            except _HashCancelled:
+                cancelled = True
+                break
             examined += 1
             report_progress()
             if digest is None:
@@ -133,10 +137,14 @@ def find_duplicates(
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
                     break
-                if entry.size <= PARTIAL_HASH_BYTES:
-                    digest = _hash_or_none(entry, PARTIAL_HASH_BYTES, issues)
-                else:
-                    digest = _hash_or_none(entry, None, issues)
+                try:
+                    if entry.size <= PARTIAL_HASH_BYTES:
+                        digest = _hash_or_none(entry, PARTIAL_HASH_BYTES, issues, cancel_event)
+                    else:
+                        digest = _hash_or_none(entry, None, issues, cancel_event)
+                except _HashCancelled:
+                    cancelled = True
+                    break
                 if digest is None:
                     excluded += 1
                     continue
@@ -165,10 +173,18 @@ def find_duplicates(
     )
 
 
-def _hash_or_none(entry: FileEntry, limit: int | None, issues: list[ScanIssue]) -> str | None:
+class _HashCancelled(Exception):
+    """Cancellation arrived while a large file was being hashed."""
+
+
+def _hash_or_none(
+    entry: FileEntry, limit: int | None, issues: list[ScanIssue], cancel_event: Event | None = None
+) -> str | None:
     """Hash a file, recording (rather than raising) problems. Returns None when excluded."""
     try:
-        return hash_file(entry, limit)
+        return hash_file(entry, limit, cancel_event=cancel_event)
+    except _HashCancelled:
+        raise
     except _ChangedDuringScan:
         issues.append(ScanIssue(str(entry.path), "Changed while being compared; excluded"))
     except OSError as exc:
@@ -176,7 +192,7 @@ def _hash_or_none(entry: FileEntry, limit: int | None, issues: list[ScanIssue]) 
     return None
 
 
-def hash_file(entry: FileEntry, limit: int | None = None) -> str:
+def hash_file(entry: FileEntry, limit: int | None = None, *, cancel_event: Event | None = None) -> str:
     """SHA-256 of the first ``limit`` bytes (or the whole file when ``limit`` is None).
 
     The file is opened without following a symbolic link and read through that
@@ -194,6 +210,10 @@ def hash_file(entry: FileEntry, limit: int | None = None) -> str:
         digest = hashlib.sha256()
         remaining = limit
         while remaining is None or remaining > 0:
+            if cancel_event is not None and cancel_event.is_set():
+                # Checked per chunk, not per file, so a multi-gigabyte file on a
+                # slow disk cannot delay cancellation until it finishes.
+                raise _HashCancelled()
             request = READ_CHUNK_BYTES if remaining is None else min(READ_CHUNK_BYTES, remaining)
             chunk = handle.read(request)
             if not chunk:

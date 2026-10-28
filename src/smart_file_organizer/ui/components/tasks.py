@@ -11,6 +11,7 @@ import logging
 import queue
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -62,6 +63,7 @@ class TaskRunner:
         self._widget = widget
         self._inbox: queue.Queue[Callable[[], None]] = queue.Queue()
         self._busy: dict[str, threading.Event] = {}
+        self._threads: dict[str, threading.Thread] = {}
         self._polling = False
 
     def is_busy(self, key: str) -> bool:
@@ -74,6 +76,24 @@ class TaskRunner:
         event = self._busy.get(key)
         if event is not None:
             event.set()
+
+    def shutdown(self, timeout: float = 10.0) -> bool:
+        """Cancel every running task and wait (bounded) for workers to finish.
+
+        Returns True only when no worker thread is still alive. The caller
+        must not release shared resources (such as the history database) while
+        this returns False: a worker that is mid-move finishes its current
+        filesystem operation, observes cancellation, and then exits.
+        """
+        for event in list(self._busy.values()):
+            event.set()
+        deadline = time.monotonic() + timeout
+        for thread in list(self._threads.values()):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+        return not any(thread.is_alive() for thread in list(self._threads.values()))
 
     def submit(
         self,
@@ -101,8 +121,12 @@ class TaskRunner:
                 self._post(lambda: self._finish(key, lambda: on_error(message)))
             else:
                 self._post(lambda: self._finish(key, lambda: on_success(result)))
+            finally:
+                self._threads.pop(key, None)
 
-        threading.Thread(target=run, name=f"task-{key}", daemon=True).start()
+        thread = threading.Thread(target=run, name=f"task-{key}", daemon=True)
+        self._threads[key] = thread
+        thread.start()
         self._ensure_polling()
         return True
 

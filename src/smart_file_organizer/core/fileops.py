@@ -30,7 +30,6 @@ import errno
 import logging
 import os
 import stat
-from contextlib import suppress
 from pathlib import Path
 from typing import IO
 
@@ -142,11 +141,75 @@ def move_no_overwrite(source: Path, destination: Path, *, expected_identity: str
     except OSError:
         linked_stats = None
 
+    if linked_stats is not None and not _matches_validated(linked_stats, source_stats):
+        # The source was replaced between our check and the link: the link we
+        # just created names the replacement, not the validated file. Remove
+        # only that link (never the source path) and refuse the move.
+        _remove_created_link(source, destination, linked_stats)
+        raise SourceChangedError("Source was replaced before the move; refusing to move it", str(source))
+
+    # Final identity check immediately before removing the source name: if the
+    # source path was replaced after linking, unlinking it would delete an
+    # unrelated file. In that case remove only the link this call created.
+    try:
+        current_source_stats: os.stat_result | None = os.lstat(source)
+    except OSError:
+        current_source_stats = None
+    if current_source_stats is None or not _matches_validated(current_source_stats, source_stats):
+        # Do NOT remove the destination link here: the replacement removed the
+        # original source name, so the destination may be the only remaining
+        # name of the validated file. Keep it and report both paths.
+        _report_unverifiable(
+            source,
+            destination,
+            SourceChangedError("Source was replaced before the move"),
+            "the source path now holds a different file",
+        )
+
     try:
         os.unlink(source)
     except OSError as exc:
         _roll_back(source, destination, linked_stats, source_stats, exc)
         raise
+
+
+def _matches_validated(candidate: os.stat_result, validated: os.stat_result) -> bool:
+    """True when ``candidate`` still describes the file that was validated.
+
+    Identity (device + inode) alone is not enough: an inode can be reused by a
+    replacement created immediately after the original was removed. Size and
+    modification time are therefore compared as well. A replacement that
+    deliberately reproduces all four values is indistinguishable by metadata
+    and remains a documented limitation.
+    """
+    return (
+        is_same_file(candidate, validated)
+        and candidate.st_size == validated.st_size
+        and candidate.st_mtime_ns == validated.st_mtime_ns
+    )
+
+
+def _remove_created_link(source: Path, destination: Path, linked_stats: os.stat_result) -> None:
+    """Remove the destination link this call created, verified by identity.
+
+    Used when the source turned out to have been replaced: the destination is
+    removed only while it still provably is the link created here. If that
+    cannot be proved or the removal fails, :class:`MoveRollbackError` reports
+    both paths instead of deleting anything uncertain.
+    """
+    try:
+        current = os.lstat(destination)
+    except OSError:
+        return  # Already gone; nothing extra was left behind.
+    if not is_same_file(current, linked_stats):
+        _report_unverifiable(
+            source, destination, OSError("Destination changed"), "that path no longer holds the link this move created"
+        )
+        return
+    try:
+        os.unlink(destination)
+    except OSError as exc:
+        _report_unverifiable(source, destination, exc, "the extra link could not be removed")
 
 
 def _roll_back(
@@ -173,8 +236,12 @@ def _roll_back(
     if not is_same_file(current, linked_stats) or not is_same_file(current, source_stats):
         _report_unverifiable(source, destination, cause, "that path no longer holds the link this move created")
         return
-    with suppress(OSError):
+    try:
         os.unlink(destination)
+    except OSError as exc:
+        # A failed cleanup must never be silent: an extra filesystem entry is
+        # being left behind, and the user needs both paths to resolve it.
+        _report_unverifiable(source, destination, exc, "the extra link could not be removed")
 
 
 def _report_unverifiable(source: Path, destination: Path, cause: OSError, why: str) -> None:

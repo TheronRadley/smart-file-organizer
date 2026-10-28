@@ -186,13 +186,28 @@ class App(ctk.CTk):
     # ----- lifecycle ---------------------------------------------------
 
     def on_close(self) -> None:
-        if self.runner.any_busy() and not dialogs.confirm(
-            self,
-            "Operation in progress",
-            "A scan or file operation is still running. Closing now may leave a batch partly applied; "
-            "it will be shown as interrupted next time. Close anyway?",
-        ):
-            return
+        if self.runner.any_busy():
+            if not dialogs.confirm(
+                self,
+                "Operation in progress",
+                "A scan or file operation is still running. Closing will cancel it safely: "
+                "the current file operation finishes, no further files are touched, and anything "
+                "already moved stays recorded. Close and cancel?",
+            ):
+                return
+            self.notify("Cancelling running operations before closing...")
+            if not self.runner.shutdown(timeout=10.0):
+                # A worker is still finishing a filesystem operation. Closing
+                # (and releasing the database) underneath it is not safe, so
+                # the window stays open and the user can retry in a moment.
+                dialogs.info(
+                    self,
+                    "Still finishing",
+                    "An operation is still finishing its current file and could not be stopped yet. "
+                    "Wait a moment, then close again.",
+                )
+                self.notify("Close cancelled: an operation is still finishing.")
+                return
         self.ctx.watches.stop_all(timeout=3.0)  # bounded: a slow folder must not block closing
         logger.info("Application closing")
         self.destroy()

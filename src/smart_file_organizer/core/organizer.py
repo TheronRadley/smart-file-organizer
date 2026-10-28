@@ -54,6 +54,7 @@ from smart_file_organizer.core.models import (
     PlannedOperation,
     ScanResult,
 )
+from smart_file_organizer.core.operation_guard import operation_lock
 from smart_file_organizer.core.scanner import describe_os_error, file_identity
 from smart_file_organizer.utils.paths import (
     is_link_like,
@@ -268,6 +269,45 @@ def execute_plan(
     chosen_indices = None if selected is None else set(selected)
     operations = [op for op in plan.operations if chosen_indices is None or op.index in chosen_indices]
 
+    if dry_run:
+        return _execute_plan(
+            plan, operations, history=history, dry_run=True, cancel_event=cancel_event, progress=progress, kind=kind
+        )
+
+    with operation_lock(plan.root) as acquired:
+        if not acquired:
+            # Another organize/undo/watch operation is moving files in this
+            # folder right now. Acting on this preview could mean acting on a
+            # half-moved tree, so every selected operation is refused.
+            reason = "Another file operation is already running for this folder; nothing was moved"
+            outcome = BatchOutcome(root=plan.root, dry_run=False, batch_id=None)
+            outcome.outcomes.extend(
+                OperationOutcome(
+                    op.index,
+                    str(op.source),
+                    str(op.destination) if op.destination else None,
+                    STATUS_SKIPPED,
+                    reason,
+                    op.size,
+                )
+                for op in operations
+            )
+            return outcome
+        return _execute_plan(
+            plan, operations, history=history, dry_run=False, cancel_event=cancel_event, progress=progress, kind=kind
+        )
+
+
+def _execute_plan(
+    plan: OrganizePlan,
+    operations: list[PlannedOperation],
+    *,
+    history: HistoryRepository | None,
+    dry_run: bool,
+    cancel_event: threading.Event | None,
+    progress: ProgressCallback | None,
+    kind: str,
+) -> BatchOutcome:
     batch_id: str | None = None
     if not dry_run and operations and history is not None:
         batch_id = history.create_batch(kind, plan.root)
@@ -285,7 +325,14 @@ def execute_plan(
             progress(position, total)
 
     if batch_id is not None and history is not None:
-        history.finish_batch(batch_id, _batch_status(outcome), _summary(outcome))
+        try:
+            history.finish_batch(batch_id, _batch_status(outcome), _summary(outcome))
+        except Exception:
+            # The moves already happened; losing the batch-finalize write must
+            # not erase the per-operation outcomes the caller is about to show.
+            # Operations still marked pending are reconciled as interrupted on
+            # the next start, so every completed move stays discoverable.
+            logger.exception("Could not finalize batch %s in history; outcomes are still reported", batch_id)
     return outcome
 
 
@@ -390,6 +437,20 @@ def _apply_operation(
         file_id=operation.file_id,
         status=STATUS_PENDING,
     )
+
+    # Last-moment containment re-check: the destination folder could have been
+    # swapped for a symlink/junction after every earlier check (including while
+    # the operation above was being journaled). If containment can no longer
+    # be guaranteed, fail closed and do not call the move at all.
+    refusal = _check_destination_folder(destination_dir, plan.root)
+    if refusal is None and not is_within(target, plan.root):
+        refusal = "Destination resolves outside the selected folder"
+    if refusal is not None:
+        history.update_operation(operation_id, STATUS_SKIPPED, error=refusal)
+        return OperationOutcome(
+            operation.index, str(operation.source), str(target), STATUS_SKIPPED, refusal, operation.size
+        )
+
     try:
         move_no_overwrite(operation.source, target, expected_identity=operation.file_id)
     except SourceChangedError as exc:
@@ -416,7 +477,25 @@ def _apply_operation(
             operation.index, str(operation.source), str(target), STATUS_FAILED, reason, operation.size
         )
 
-    history.update_operation(operation_id, STATUS_SUCCESS, destination=str(target))
+    try:
+        history.update_operation(operation_id, STATUS_SUCCESS, destination=str(target))
+    except Exception:
+        # The file is already moved. The operation stays 'pending' in history,
+        # so on the next start it is marked interrupted and Recovery guidance
+        # will locate the file at its destination: the completed move remains
+        # discoverable instead of vanishing with the failed write.
+        logger.exception(
+            "Move of %s succeeded but recording it failed; it will surface as interrupted on restart",
+            operation.source.name,
+        )
+        return OperationOutcome(
+            operation.index,
+            str(operation.source),
+            str(target),
+            STATUS_SUCCESS,
+            "Moved, but recording the result in history failed; restart the app and check Recovery guidance",
+            operation.size,
+        )
     return OperationOutcome(operation.index, str(operation.source), str(target), STATUS_SUCCESS, "", operation.size)
 
 

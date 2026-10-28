@@ -48,6 +48,7 @@ from smart_file_organizer.core.models import (
 )
 from smart_file_organizer.core.organizer import CANCELLED_REASON, build_plan, execute_plan
 from smart_file_organizer.core.scanner import ScanError, scan_folder
+from smart_file_organizer.utils.paths import normalise
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,8 @@ class PendingMove:
     source: Path
     destination: Path | None
     size: int
+    modified_ns: int = 0
+    file_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -188,11 +191,17 @@ class FolderWatcher:
             # Stopped mid-scan: the entries are incomplete, so nothing may be moved.
             return []
 
+        # A genuinely successful poll clears any earlier error. Failures above
+        # return before this point, so their error is preserved until a poll
+        # actually succeeds (previously _run cleared it immediately).
+        self.last_error = None
         plan = self._build_plan(scan)
         stable = self._stable_operations(plan, now)
 
         with self._lock:
-            self._state.pending = [PendingMove(op.source, op.destination, op.size) for op in stable]
+            self._state.pending = [
+                PendingMove(op.source, op.destination, op.size, op.modified_ns, op.file_id) for op in stable
+            ]
             self._state.pending_keys = {_key(op) for op in stable}
 
         if not self.config.auto_apply or not stable:
@@ -206,12 +215,17 @@ class FolderWatcher:
         """Apply the moves that were listed as pending, if they are still unchanged.
 
         The rebuilt plan must reproduce the exact source -> destination mapping
-        that was displayed for approval. A file whose destination would differ
-        is left pending for renewed approval instead of being moved somewhere
-        the user never saw.
+        that was displayed for approval, for the *same file*: source, destination,
+        size, modification time, and file identity must all match what was
+        approved. A same-named replacement file (even with identical size and
+        timestamps) was never approved, so it is left pending for renewed
+        approval instead of being moved.
         """
         with self._lock:
-            approved = {item.source: item.destination for item in self._state.pending}
+            approved = {
+                item.source: (item.destination, item.size, item.modified_ns, item.file_id)
+                for item in self._state.pending
+            }
         if not approved:
             return None
         scan = scan_folder(self.folder, self.config.scan_options)
@@ -221,10 +235,11 @@ class FolderWatcher:
         for operation in plan.ready:
             if operation.source not in approved:
                 continue
-            (operations if operation.destination == approved[operation.source] else drifted).append(operation)
+            current = (operation.destination, operation.size, operation.modified_ns, operation.file_id)
+            (operations if current == approved[operation.source] else drifted).append(operation)
         for operation in drifted:
             self._log(
-                f"Destination for {operation.source.name} changed since it was shown; "
+                f"{operation.source.name} or its destination changed since it was shown; "
                 "it was not moved and needs fresh approval."
             )
         if not operations:
@@ -233,7 +248,9 @@ class FolderWatcher:
             else:
                 # Show the new destinations; they were never approved.
                 with self._lock:
-                    self._state.pending = [PendingMove(op.source, op.destination, op.size) for op in drifted]
+                    self._state.pending = [
+                        PendingMove(op.source, op.destination, op.size, op.modified_ns, op.file_id) for op in drifted
+                    ]
                     self._state.pending_keys = {_key(op) for op in drifted}
             return None
         outcome = self._apply(plan, operations, self._current_stop_event())
@@ -241,7 +258,9 @@ class FolderWatcher:
             # _apply clears the pending list; restore the unapproved files with
             # their new destinations so renewed approval is possible.
             with self._lock:
-                self._state.pending = [PendingMove(op.source, op.destination, op.size) for op in drifted]
+                self._state.pending = [
+                    PendingMove(op.source, op.destination, op.size, op.modified_ns, op.file_id) for op in drifted
+                ]
                 self._state.pending_keys = {_key(op) for op in drifted}
         return outcome
 
@@ -398,7 +417,6 @@ class FolderWatcher:
                     break
                 try:
                     self.poll_once(stop_event)
-                    self.last_error = None
                 except (OSError, sqlite3.Error) as exc:
                     # Logged with its traceback and surfaced in the UI; the watcher keeps running.
                     logger.exception("Monitoring poll failed for %s", self.folder)
@@ -416,21 +434,38 @@ class WatchManager:
         self._watchers: dict[str, FolderWatcher] = {}
 
     def add(self, watcher: FolderWatcher) -> None:
-        key = str(watcher.folder)
+        # Folder identity is normalized (links resolved, case-normalized), so
+        # the same folder cannot be monitored twice via a different spelling,
+        # a relative path, or different Windows casing.
+        key = normalise(watcher.folder)
         if key in self._watchers:
             raise ValueError(f"{watcher.folder} is already being monitored.")
         self._watchers[key] = watcher
 
-    def remove(self, folder: Path, timeout: float = 10.0) -> None:
-        watcher = self._watchers.pop(str(folder), None)
-        if watcher is not None:
-            watcher.stop(timeout)
+    def remove(self, folder: Path, timeout: float = 10.0) -> bool:
+        """Stop and unregister a watcher. Returns False when it is kept.
+
+        A watcher that is still stopping is *not* discarded: dropping it would
+        let a second watcher start on the same folder while the first one is
+        still winding down. It stays registered (and findable) until its thread
+        has exited, after which a later remove succeeds.
+        """
+        key = normalise(folder)
+        watcher = self._watchers.get(key)
+        if watcher is None:
+            return True
+        watcher.stop(timeout)
+        if watcher.is_thread_alive:
+            logger.warning("Watcher for %s is still stopping; keeping it registered", folder)
+            return False
+        del self._watchers[key]
+        return True
 
     def watchers(self) -> list[FolderWatcher]:
         return list(self._watchers.values())
 
     def get(self, folder: Path) -> FolderWatcher | None:
-        return self._watchers.get(str(folder))
+        return self._watchers.get(normalise(folder))
 
     def stop_all(self, timeout: float = 10.0) -> None:
         """Stop every watcher, waiting at most ``timeout`` seconds for each.

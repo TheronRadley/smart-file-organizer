@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,8 @@ def parse_positive_float(text: str, label: str, *, minimum: float = 0.0) -> floa
         value = float(text.strip())
     except ValueError as exc:
         raise ValueError(f"{label} must be a number.") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be a finite number.")
     if value < minimum:
         raise ValueError(f"{label} must be at least {minimum:g}.")
     return value

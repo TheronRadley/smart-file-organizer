@@ -354,3 +354,63 @@ def test_apply_pending_refuses_a_destination_the_user_never_saw(
     outcome = watcher.apply_pending()
     assert outcome is not None and outcome.success_count == 1
     assert (workspace / "Documents" / "one (2).pdf").exists()
+
+
+def test_apply_pending_refuses_a_same_size_same_timestamp_replacement(
+    workspace: Path, options: ScanOptions, history: HistoryRepository
+) -> None:
+    clock = FakeClock(1_700_000_000)
+    watcher = _watcher(workspace, False, options, history, clock)
+    original = make_file(workspace / "one.pdf", b"AAAA", mtime=int(clock.now))
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    assert len(watcher.pending) == 1
+
+    # Replace the approved file with a different file that has the same name,
+    # the same size, and the same modification time. Only its identity differs.
+    # (Created while the original exists, so it cannot reuse its inode.)
+    replacement = make_file(workspace / "replacement.bin", b"BBBB", mtime=int(clock.now) - 11)
+    os.replace(replacement, original)
+
+    assert watcher.apply_pending() is None
+    assert (workspace / "one.pdf").read_bytes() == b"BBBB", "the unapproved replacement must not be moved"
+    assert not (workspace / "Documents" / "one.pdf").exists()
+    assert history.list_batches() == []
+    # It is offered again as a new pending file, requiring fresh approval.
+    assert len(watcher.pending) == 1
+
+
+def test_failed_poll_error_survives_until_a_successful_poll(
+    workspace: Path, options: ScanOptions, history: HistoryRepository
+) -> None:
+    watcher = _watcher(workspace / "gone", False, options, history, FakeClock(0))
+    # Simulate what _run does: poll_once must leave last_error in place (it used
+    # to be cleared unconditionally by the worker loop right after the poll).
+    assert watcher.poll_once() == []
+    assert watcher.last_error is not None and "no longer exists" in watcher.last_error
+    (workspace / "gone").mkdir(parents=True)
+    watcher.folder = workspace / "gone"
+    assert watcher.poll_once() == []
+    assert watcher.last_error is None, "only a genuinely successful poll may clear the error"
+
+
+def test_manager_normalizes_folder_identity_and_keeps_stopping_watchers(
+    workspace: Path, options: ScanOptions, history: HistoryRepository
+) -> None:
+    manager = WatchManager()
+    watcher = _watcher(workspace, False, options, history, FakeClock(0))
+    manager.add(watcher)
+    assert manager.get(workspace / ".") is watcher, "an alternative spelling must resolve to the same watcher"
+    with pytest.raises(ValueError):
+        manager.add(_watcher(workspace / ".", False, options, history, FakeClock(0)))
+
+    # A watcher that is still stopping must not be discarded.
+    watcher._thread = threading.Thread(target=time.sleep, args=(0.4,))
+    watcher._thread.start()
+    assert manager.remove(workspace, timeout=0.05) is False
+    assert manager.get(workspace) is watcher, "the stopping watcher stays registered"
+    watcher._thread.join()
+    watcher._thread = None
+    assert manager.remove(workspace) is True
+    assert len(manager) == 0

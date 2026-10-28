@@ -100,3 +100,14 @@ without hard-link support, and killing the application mid-operation.
 
 Note the Windows build, the application version, the date, and the outcome of each item.
 Where an item fails, keep `app.log` and the history database and report them privately.
+
+## Automated race coverage (all platforms, CI)
+
+The following are covered by deterministic tests on Windows, Linux, and macOS and do not
+need manual repetition; they are listed so manual runs can focus on what automation cannot
+reach (real reparse points, locked files, packaged executable):
+
+- Source replaced before linking, after linking, and before unlinking (`tests/test_fileops.py`)
+- Destination folder swapped for a symlink during journaling (`tests/test_adversarial_safety.py`)
+- Automation approving a same-name, same-size, same-timestamp replacement (`tests/test_watcher.py`)
+- Competing destination creation, cross-volume failure, shutdown with active workers
