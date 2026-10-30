@@ -258,10 +258,18 @@ class OrganizePage(BasePage):
         tab.grid_rowconfigure(2, weight=1)
         controls = ctk.CTkFrame(tab, fg_color="transparent")
         controls.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-        self._mode = ctk.CTkOptionMenu(controls, values=list(MODE_LABELS), width=190, height=34)
+        self._mode = ctk.CTkOptionMenu(
+            controls, values=list(MODE_LABELS), width=190, height=34, command=lambda _v: self._invalidate_preview()
+        )
         self._mode.set("By file type")
         self._mode.pack(side="left")
-        self._collision = ctk.CTkOptionMenu(controls, values=list(COLLISION_LABELS), width=230, height=34)
+        self._collision = ctk.CTkOptionMenu(
+            controls,
+            values=list(COLLISION_LABELS),
+            width=230,
+            height=34,
+            command=lambda _v: self._invalidate_preview(),
+        )
         self._collision.set("Rename safely (name (2).ext)")
         self._collision.pack(side="left", padx=8)
         button(controls, "Build preview", self._build_preview, primary=True, width=130).pack(side="left")
@@ -312,9 +320,29 @@ class OrganizePage(BasePage):
             disabled_categories=set(self.ctx.settings.disabled_categories),
         )
         self.ctx.last_plan = plan
-        self._render_plan(plan)
+        self._render_plan(plan, preserve_selection=False)
 
-    def _render_plan(self, plan: OrganizePlan | None, outcome: BatchOutcome | None = None) -> None:
+    def _invalidate_preview(self) -> None:
+        """Drop the current preview when the organization rules change.
+
+        A plan built under different mode/collision rules must not stay
+        applicable after the user changes those rules.
+        """
+        if self.ctx.last_plan is not None:
+            self.ctx.last_plan = None
+            self._render_plan(None)
+            self.notify("Preview cleared: the organization rules changed. Build a new preview.")
+
+    def _render_plan(
+        self, plan: OrganizePlan | None, outcome: BatchOutcome | None = None, *, preserve_selection: bool = True
+    ) -> None:
+        # Captured before clearing: refreshes and dry-run results must not
+        # silently reselect every ready file (Remove: automatic reselection).
+        selected_before = (
+            {op.index for op in self._plan_table.selected_payloads() if isinstance(op, PlannedOperation)}
+            if preserve_selection
+            else set()
+        )
         self._plan_table.clear()
         if plan is None:
             self._summary.configure(text="Build a preview from a scanned folder to see proposed moves.")
@@ -335,7 +363,13 @@ class OrganizePage(BasePage):
             )
             if operation.status == STATUS_READY:
                 ready_iids.append(iid)
-        self._plan_table.select_rows(ready_iids)
+        if selected_before:
+            by_index = {op.index: iid for iid, op in self._plan_table.items()}
+            self._plan_table.select_rows(
+                [by_index[index] for index in selected_before if index in by_index and by_index[index] in ready_iids]
+            )
+        else:
+            self._plan_table.select_rows(ready_iids)
         self._summary.configure(
             text=(
                 f"{len(plan.ready):,} ready to move ({format_size(plan.bytes_to_move)}) · "

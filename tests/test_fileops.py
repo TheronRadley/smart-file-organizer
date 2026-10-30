@@ -250,3 +250,57 @@ def test_failed_rollback_cleanup_is_reported_with_both_paths(workspace: Path, mo
 
     assert destination.exists(), "the un-removable extra link stays, and must be reported, not silently suppressed"
     assert str(source) in info.value.recovery and str(destination) in info.value.recovery
+
+
+def test_destination_disappearing_after_link_aborts_without_deleting_source(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_file(workspace / "source.txt", b"payload")
+    destination = workspace / "Documents" / "source.txt"
+    destination.parent.mkdir()
+    real_link = os.link
+
+    def link_then_remove_destination(src, dst, *args, **kwargs):
+        real_link(src, dst)
+        os.unlink(dst)  # destination vanishes immediately after linking
+
+    monkeypatch.setattr(fileops.os, "link", link_then_remove_destination)
+
+    with pytest.raises(MoveRollbackError):
+        move_no_overwrite(source, destination)
+
+    assert source.read_bytes() == b"payload", "aborting must leave the source in place"
+    assert not destination.exists()
+
+
+def test_destination_parent_swapped_for_symlink_before_link_is_refused(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from .conftest import symlinks_supported
+
+    if not symlinks_supported(tmp_path):
+        pytest.skip("Symbolic links are not permitted in this environment")
+    outside = tmp_path / "outside-target"
+    outside.mkdir()
+    source = make_file(workspace / "source.txt", b"payload")
+    destination_dir = workspace / "Documents"
+    destination_dir.mkdir()
+    destination = destination_dir / "source.txt"
+    real_link = os.link
+
+    def swap_parent_then_link(src, dst, *args, **kwargs):
+        moved = workspace / "Documents-real"
+        destination_dir.rename(moved)
+        os.symlink(outside, destination_dir, target_is_directory=True)
+        try:
+            return real_link(src, dst)
+        finally:
+            pass
+
+    monkeypatch.setattr(fileops.os, "link", swap_parent_then_link)
+
+    with pytest.raises(SourceChangedError):
+        move_no_overwrite(source, destination)
+
+    assert source.read_bytes() == b"payload"
+    assert not (outside / "source.txt").exists(), "the redirected link must be removed, nothing kept outside"

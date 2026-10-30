@@ -185,7 +185,17 @@ class AutomationPage(BasePage):
         if folder is None:
             dialogs.info(self, "Select a folder", "Select a folder in the list first.")
             return
-        self.ctx.watches.remove(Path(folder), UI_STOP_TIMEOUT)
+        if not self.ctx.watches.remove(Path(folder), UI_STOP_TIMEOUT):
+            # Still stopping: keep the folder listed and monitored until the
+            # worker has actually exited, rather than orphaning the watcher.
+            dialogs.info(
+                self,
+                "Still stopping",
+                "That folder is still finishing its current check. It will remain listed until monitoring "
+                "has fully stopped; try removing it again in a moment.",
+            )
+            self.refresh()
+            return
         self.ctx.settings.watch_folders = [f for f in self.ctx.settings.watch_folders if f != folder]
         self.ctx.save_settings()
         self.refresh()
@@ -195,6 +205,28 @@ class AutomationPage(BasePage):
     def _save_options(self) -> None:
         self.ctx.settings.watch_recursive = bool(self._recursive.get())
         self.ctx.save_settings()
+        self._apply_live_config()
+
+    def _apply_live_config(self) -> None:
+        """Push current automation settings into already-created watchers."""
+        settings = self.ctx.settings
+        if not self.ctx.watches.watchers():
+            return
+        config = WatchConfig(
+            organize_by=settings.organize_by,
+            collision_strategy=settings.collision_strategy,
+            recursive=bool(self._recursive.get()),
+            auto_apply=bool(self._auto.get()),
+            scan_options=ScanOptions(
+                recursive=bool(self._recursive.get()),
+                excluded_folders=tuple(settings.excluded_folders),
+                excluded_patterns=tuple(settings.excluded_patterns),
+            ),
+            disabled_categories=frozenset(settings.disabled_categories),
+            interval_seconds=float(settings.watch_interval_seconds),
+            stable_seconds=STABLE_SECONDS,
+        )
+        self.ctx.watches.update_config(config)
 
     def _toggle_auto(self) -> None:
         if self._auto.get():
@@ -210,6 +242,7 @@ class AutomationPage(BasePage):
                 return
         self.ctx.settings.watch_auto_apply = bool(self._auto.get())
         self.ctx.save_settings()
+        self._apply_live_config()
 
     # ----- controls ------------------------------------------------------
 
@@ -236,7 +269,15 @@ class AutomationPage(BasePage):
         started = 0
         for folder in folders:
             path = Path(folder)
-            if self.ctx.watches.get(path) is not None:
+            existing = self.ctx.watches.get(path)
+            if existing is not None:
+                # A stopped (fully exited) watcher must restart when Start is
+                # pressed again; previously it was skipped forever. A watcher
+                # still stopping is left alone so two threads never run.
+                if existing.status == "stopped" and not existing.is_thread_alive:
+                    existing.config = config
+                    existing.start()
+                    started += 1
                 continue
             watcher = FolderWatcher(path, config, classifier=self.ctx.classifier, history=self.ctx.history)
             self.ctx.watches.add(watcher)
@@ -280,7 +321,7 @@ class AutomationPage(BasePage):
         def work(task: TaskContext) -> tuple[int, int, int]:
             moved = skipped = failed = 0
             for watcher in watchers:
-                outcome = watcher.apply_pending()
+                outcome = watcher.apply_pending(task.cancel_event)
                 if outcome is not None:
                     moved += outcome.success_count
                     skipped += outcome.skipped_count

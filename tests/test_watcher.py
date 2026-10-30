@@ -414,3 +414,28 @@ def test_manager_normalizes_folder_identity_and_keeps_stopping_watchers(
     watcher._thread = None
     assert manager.remove(workspace) is True
     assert len(manager) == 0
+
+
+def test_apply_pending_honours_a_cancelled_task(
+    workspace: Path, options: ScanOptions, history: HistoryRepository
+) -> None:
+    clock = FakeClock(1_700_000_000)
+    watcher = _watcher(workspace, False, options, history, clock)
+    make_file(workspace / "one.pdf", mtime=int(clock.now))
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    assert len(watcher.pending) == 1
+    cancel = threading.Event()
+    cancel.set()
+    assert watcher.apply_pending(cancel) is None
+    assert (workspace / "one.pdf").exists()
+    assert history.list_batches() == []
+
+
+def test_stop_all_reports_whether_every_watcher_exited(
+    workspace: Path, options: ScanOptions, history: HistoryRepository
+) -> None:
+    manager = WatchManager()
+    manager.add(_watcher(workspace, False, options, history, FakeClock(0)))
+    assert manager.stop_all(timeout=1.0) is True

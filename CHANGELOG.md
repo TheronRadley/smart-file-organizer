@@ -6,6 +6,25 @@ aims to follow [Semantic Versioning](https://semver.org/) once it has its first 
 
 ## [Unreleased]
 
+### Safety (audit on 080e9db)
+- **Destination vanishing or changing mid-move can no longer lose files.** If the destination
+  cannot be verified after linking, the move aborts with the source left in place; if the
+  destination folder is swapped during linking, the redirected link is removed and the move is
+  refused. Rollback comparisons now use identity plus size/timestamp (inode-reuse safe), and
+  the export publication cleanup verifies the file from its own handle before deleting a
+  partial report, so a replacement created during copying is never deleted.
+- **History and shutdown coordination.** `History.clear()` is refused while a file operation
+  runs; closing the window requires every watcher worker to have exited before SQLite is
+  closed; undo and Apply Pending honour the UI task cancellation token; undo journals its
+  intent before restoring and leaves unresolved outcomes as recoverable `undo_partial` records
+  with identity-verified Recovery guidance; only the primary app instance (data-folder lock)
+  runs startup recovery.
+- **Automation and preview fixes.** Start restarts fully stopped watchers; automation setting
+  changes (including disabling automatic moves) apply to existing watchers; a folder whose
+  watcher is still stopping stays listed; Organize preserves file selection across dry runs
+  and refreshes, no longer auto-reselecting everything, and changing organization rules
+  invalidates the stale preview. History exports are no longer capped at 200 batches.
+
 ### Safety (2026-10-28 audit)
 - **Source-replacement races closed in `move_no_overwrite`.** The linked destination is verified
   against the validated file (identity, size, and timestamp, which also catches inode reuse), and

@@ -211,7 +211,7 @@ class FolderWatcher:
             return []
         return [self._apply(plan, stable, cancel)]
 
-    def apply_pending(self) -> BatchOutcome | None:
+    def apply_pending(self, cancel_event: threading.Event | None = None) -> BatchOutcome | None:
         """Apply the moves that were listed as pending, if they are still unchanged.
 
         The rebuilt plan must reproduce the exact source -> destination mapping
@@ -228,7 +228,11 @@ class FolderWatcher:
             }
         if not approved:
             return None
-        scan = scan_folder(self.folder, self.config.scan_options)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        scan = scan_folder(self.folder, self.config.scan_options, cancel_event=cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         plan = self._build_plan(scan)
         operations = []
         drifted: list[PlannedOperation] = []
@@ -253,7 +257,9 @@ class FolderWatcher:
                     ]
                     self._state.pending_keys = {_key(op) for op in drifted}
             return None
-        outcome = self._apply(plan, operations, self._current_stop_event())
+        outcome = self._apply(
+            plan, operations, cancel_event if cancel_event is not None else self._current_stop_event()
+        )
         if drifted:
             # _apply clears the pending list; restore the unapproved files with
             # their new destinations so renewed approval is possible.
@@ -467,14 +473,22 @@ class WatchManager:
     def get(self, folder: Path) -> FolderWatcher | None:
         return self._watchers.get(normalise(folder))
 
-    def stop_all(self, timeout: float = 10.0) -> None:
+    def stop_all(self, timeout: float = 10.0) -> bool:
         """Stop every watcher, waiting at most ``timeout`` seconds for each.
 
-        A watcher that needs longer keeps winding down on its own: cancellation
-        has already reached it, so it moves nothing further.
+        Returns True only when every watcher thread has actually exited. A
+        caller releasing shared resources (window, database) must not proceed
+        while this returns False.
         """
         for watcher in self._watchers.values():
             watcher.stop(timeout)
+        return all(not watcher.is_thread_alive for watcher in self._watchers.values())
+
+    def update_config(self, config: WatchConfig) -> None:
+        """Apply new settings to every existing watcher (for example disabling
+        automatic moves). Folder and classifier/history bindings are kept."""
+        for watcher in self._watchers.values():
+            watcher.config = config
 
     def __len__(self) -> int:
         return len(self._watchers)

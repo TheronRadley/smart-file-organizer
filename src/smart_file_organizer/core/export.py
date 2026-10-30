@@ -99,7 +99,7 @@ class Export:
     summary: dict[str, Any]
 
 
-def history_export(history: HistoryRepository, *, limit: int = 200) -> Export:
+def history_export(history: HistoryRepository, *, limit: int | None = None) -> Export:
     """One row per recorded operation, newest batch first."""
     batches = history.list_batches(limit)
     rows: list[dict[str, Any]] = []
@@ -249,6 +249,21 @@ def write_export(export: Export, path: Path | str, *, overwrite: bool = False) -
     return target
 
 
+def _is_same_export_file(current: os.stat_result, created: os.stat_result) -> bool:
+    """Storage-identity check so cleanup never deletes a replacement file.
+
+    Device+inode alone is not enough (a replacement can reuse the inode), so
+    the creation/change time reported by the file's own handle must match too.
+    """
+    if not current.st_ino or not created.st_ino:
+        return False
+    return (current.st_dev, current.st_ino, current.st_ctime_ns) == (
+        created.st_dev,
+        created.st_ino,
+        created.st_ctime_ns,
+    )
+
+
 def _publish_no_overwrite(temporary: Path, target: Path) -> None:
     """Publish ``temporary`` as ``target`` only if ``target`` is still free.
 
@@ -264,21 +279,45 @@ def _publish_no_overwrite(temporary: Path, target: Path) -> None:
         # Exclusive-create copy. If the copy fails halfway (disk full, target
         # removed), the incomplete destination this call created is removed:
         # a partial report must never sit at the target looking complete.
-        created = False
+        destination_handle = None
         try:
-            with open(temporary, "rb") as source, open(target, "xb") as destination:
-                created = True
-                shutil.copyfileobj(source, destination)
-        except BaseException:
-            if created:
+            with open(temporary, "rb") as source:
+                destination_handle = open(target, "xb")  # noqa: SIM115 - closed explicitly below (identity needed)
                 try:
-                    target.unlink()
-                except OSError as cleanup_exc:
+                    shutil.copyfileobj(source, destination_handle)
+                finally:
+                    # Identity of the file WE created, read from its own handle
+                    # at failure time. If the target path was replaced during
+                    # copying, the path now names a different file: never delete it.
+                    try:
+                        created_stats: os.stat_result | None = os.fstat(destination_handle.fileno())
+                    except (OSError, ValueError):
+                        created_stats = None
+                    destination_handle.close()
+                    destination_handle = None
+        except BaseException:
+            if created_stats is not None:
+                try:
+                    current = os.lstat(target)
+                except OSError:
+                    current = None
+                if current is not None and _is_same_export_file(current, created_stats):
+                    try:
+                        target.unlink()
+                    except OSError as cleanup_exc:
+                        raise OSError(
+                            errno.EIO,
+                            f"Incomplete export could not be removed; delete '{target}' manually",
+                        ) from cleanup_exc
+                elif current is not None:
                     raise OSError(
                         errno.EIO,
-                        f"Incomplete export could not be removed; delete '{target}' manually",
-                    ) from cleanup_exc
+                        f"Incomplete export at '{target}' was replaced during copying and left in place",
+                    ) from None
             raise
+        finally:
+            if destination_handle is not None:
+                destination_handle.close()
     temporary.unlink()
 
 

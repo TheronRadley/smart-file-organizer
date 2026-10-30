@@ -39,9 +39,20 @@ def main() -> int:
         return 1
 
     history = HistoryRepository(database)
-    interrupted = history.recover_interrupted()
-    if interrupted:
-        logger.warning("%d operation(s) were left unfinished by an earlier run and are marked interrupted", interrupted)
+    # Only the primary instance may reconcile interrupted work: a second
+    # instance sharing this data folder must not mark the first instance's
+    # still-running operations as interrupted.
+    from smart_file_organizer.core.instance import try_acquire_instance_lock
+
+    _instance_lock = try_acquire_instance_lock(data_dir)  # kept alive until main() returns
+    if _instance_lock is not None:
+        interrupted = history.recover_interrupted()
+        if interrupted:
+            logger.warning(
+                "%d operation(s) were left unfinished by an earlier run and are marked interrupted", interrupted
+            )
+    else:
+        logger.warning("Another instance is already running; startup recovery was skipped for this instance")
 
     # Imported here so that the core modules and tests never need tkinter.
     from smart_file_organizer.ui.app_window import App

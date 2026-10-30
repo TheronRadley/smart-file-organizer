@@ -110,6 +110,9 @@ def move_no_overwrite(source: Path, destination: Path, *, expected_identity: str
     if expected_identity is not None and file_identity(source_stats, source) != expected_identity:
         raise SourceChangedError("Source was replaced before the move; refusing to move it", str(source))
 
+    # Capture destination parent identity. If parent is link-like refuse.
+    parent_stats = _destination_parent_guard(destination)
+
     try:
         os.link(source, destination)
     except FileExistsError:
@@ -120,6 +123,20 @@ def move_no_overwrite(source: Path, destination: Path, *, expected_identity: str
         if isinstance(exc, FileNotFoundError) or not os.path.lexists(source):
             raise
         if os.name == "nt":
+            # Re-verify immediately before rename: source still validated file,
+            # destination parent still a real (non-link) directory. Otherwise
+            # rename could move a replacement or redirect outside root.
+            try:
+                now_stats = os.lstat(source)
+            except OSError:
+                raise SourceChangedError(
+                    "Source was replaced before the move; refusing to move it", str(source)
+                ) from exc
+            if not stat.S_ISREG(now_stats.st_mode) or not _matches_validated(now_stats, source_stats):
+                raise SourceChangedError(
+                    "Source was replaced before the move; refusing to move it", str(source)
+                ) from exc
+            _destination_parent_guard(destination)
             logger.info(
                 "Hard link unavailable for %s (%s); using Windows no-overwrite rename",
                 source.name,
@@ -140,6 +157,26 @@ def move_no_overwrite(source: Path, destination: Path, *, expected_identity: str
         linked_stats: os.stat_result | None = os.lstat(destination)
     except OSError:
         linked_stats = None
+
+    if linked_stats is None:
+        # Destination disappeared / cannot be verified after linking. Abort
+        # WITHOUT deleting source: unlinking source here would lose both paths.
+        raise MoveRollbackError(
+            f"Move aborted: '{destination}' could not be verified after linking, so '{source}' was left in place",
+            recovery=(
+                f"'{source}' was left in place and no verified copy exists at '{destination}'. "
+                "Check both paths; run the operation again when the destination folder is stable."
+            ),
+            filename=str(destination),
+        )
+
+    if not _destination_parent_unchanged(destination, parent_stats):
+        # Parent swapped for link/other dir during linking, redirecting move.
+        # Remove only link this call created (verified), keep source, fail closed.
+        _remove_created_link(source, destination, linked_stats)
+        raise SourceChangedError(
+            "Destination folder changed during the move; refusing to move outside the selected folder", str(destination)
+        )
 
     if linked_stats is not None and not _matches_validated(linked_stats, source_stats):
         # The source was replaced between our check and the link: the link we
@@ -173,6 +210,27 @@ def move_no_overwrite(source: Path, destination: Path, *, expected_identity: str
         raise
 
 
+def _destination_parent_guard(destination: Path) -> os.stat_result:
+    """Return destination parent stats, refusing link/non-directory parents."""
+    parent = destination.parent
+    try:
+        stats = os.lstat(parent)
+    except OSError:
+        raise
+    if stat.S_ISLNK(stats.st_mode) or not stat.S_ISDIR(stats.st_mode):
+        raise SourceChangedError("Destination folder is a link or not a folder; refusing to move", str(parent))
+    return stats
+
+
+def _destination_parent_unchanged(destination: Path, captured: os.stat_result) -> bool:
+    """True if destination parent is still the exact directory captured pre-link."""
+    try:
+        current = os.lstat(destination.parent)
+    except OSError:
+        return False
+    return stat.S_ISDIR(current.st_mode) and is_same_file(current, captured)
+
+
 def _matches_validated(candidate: os.stat_result, validated: os.stat_result) -> bool:
     """True when ``candidate`` still describes the file that was validated.
 
@@ -201,7 +259,7 @@ def _remove_created_link(source: Path, destination: Path, linked_stats: os.stat_
         current = os.lstat(destination)
     except OSError:
         return  # Already gone; nothing extra was left behind.
-    if not is_same_file(current, linked_stats):
+    if not _matches_validated(current, linked_stats):
         _report_unverifiable(
             source, destination, OSError("Destination changed"), "that path no longer holds the link this move created"
         )
@@ -233,7 +291,7 @@ def _roll_back(
         current = os.lstat(destination)
     except OSError:
         return  # The link is already gone; nothing to clean up.
-    if not is_same_file(current, linked_stats) or not is_same_file(current, source_stats):
+    if not _matches_validated(current, linked_stats) or not _matches_validated(current, source_stats):
         _report_unverifiable(source, destination, cause, "that path no longer holds the link this move created")
         return
     try:

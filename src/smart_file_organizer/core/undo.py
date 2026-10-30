@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from smart_file_organizer.core.models import (
     UNDO_DONE,
     UNDO_FAILED,
     UNDO_KEPT,
+    UNDO_PENDING,
     BatchRecord,
     OperationRecord,
 )
@@ -146,7 +148,7 @@ def _check_move(operation: OperationRecord, root: Path) -> UndoItem:
     return UndoItem(operation, original, current, UNDO_STATUS_READY)
 
 
-def undo_batch(batch_id: str, history: HistoryRepository) -> UndoResult:
+def undo_batch(batch_id: str, history: HistoryRepository, *, cancel_event: threading.Event | None = None) -> UndoResult:
     """Reverse a batch if it is safe to do so. Refuses (changing nothing) otherwise.
 
     Individual moves are re-checked just before they run, so a file changed
@@ -157,10 +159,12 @@ def undo_batch(batch_id: str, history: HistoryRepository) -> UndoResult:
     with operation_lock(preview_root) as acquired:
         if not acquired:
             raise UndoError("Another file operation is already running for this folder; undo changed nothing.")
-        return _undo_batch_locked(batch_id, history)
+        return _undo_batch_locked(batch_id, history, cancel_event=cancel_event)
 
 
-def _undo_batch_locked(batch_id: str, history: HistoryRepository) -> UndoResult:
+def _undo_batch_locked(
+    batch_id: str, history: HistoryRepository, *, cancel_event: threading.Event | None = None
+) -> UndoResult:
     preview = preview_undo(batch_id, history)
     if not preview.items:
         raise UndoError("Every move in this batch has already been reversed.")
@@ -176,6 +180,10 @@ def _undo_batch_locked(batch_id: str, history: HistoryRepository) -> UndoResult:
     restored = failed = skipped = 0
     messages: list[str] = []
     for item in preview.items:
+        if cancel_event is not None and cancel_event.is_set():
+            skipped += 1
+            messages.append(f"Skipped {item.current.name}: Cancelled before this file was restored")
+            continue
         current_check = _check_move(item.operation, Path(preview.batch.root_path))
         if current_check.status == UNDO_STATUS_BLOCKED:
             skipped += 1
@@ -197,6 +205,16 @@ def _undo_batch_locked(batch_id: str, history: HistoryRepository) -> UndoResult:
             skipped += 1
             messages.append(f"Skipped {item.current.name}: {final_check.reason}")
             continue
+        # Journal undo intent BEFORE restoring: if the outcome write below (or
+        # the process) fails after the file is restored, the operation stays in
+        # 'undoing' state and the batch is marked undo_partial, which Recovery
+        # guidance treats as needing verification - never as completed.
+        try:
+            history.set_undo_result(item.operation.id, UNDO_PENDING)
+        except Exception:
+            failed += 1
+            messages.append(f"Could not record undo intent for {item.current.name}; it was not restored")
+            continue
         try:
             move_no_overwrite(item.current, item.original, expected_identity=item.operation.file_id)
         except OSError as exc:
@@ -209,7 +227,15 @@ def _undo_batch_locked(batch_id: str, history: HistoryRepository) -> UndoResult:
             messages.append(f"Could not restore {item.current.name}: {reason}")
             continue
         restored += 1
-        history.set_undo_result(item.operation.id, UNDO_DONE)
+        try:
+            history.set_undo_result(item.operation.id, UNDO_DONE)
+        except Exception:
+            # Restored, but the record still says 'undoing'. Counted as restored
+            # for the user, left unresolved for recovery (batch: undo_partial).
+            logger.exception("Restored %s but could not record the undo outcome", item.current.name)
+            messages.append(
+                f"Restored {item.current.name}, but recording it failed; check Recovery guidance after restarting"
+            )
 
     removed = kept = 0
     for folder_op in preview.folders_to_remove:
@@ -227,16 +253,25 @@ def _undo_batch_locked(batch_id: str, history: HistoryRepository) -> UndoResult:
         except OSError as exc:
             kept += 1
             history.set_undo_result(folder_op.id, UNDO_KEPT, describe_os_error(exc))
+        except Exception:
+            kept += 1
+            logger.exception("Could not record the folder outcome during undo")
 
     remaining = _remaining_moves(batch_id, history)
-    if failed == 0 and skipped == 0 and remaining == 0:
-        history.set_batch_status(batch_id, "undone", f"Reversed {restored} move(s)")
-    else:
-        history.set_batch_status(
-            batch_id,
-            "undo_partial",
-            f"Reversed {restored}; {failed} failed and {skipped} skipped. Run Undo again after resolving the cause.",
-        )
+    try:
+        if failed == 0 and skipped == 0 and remaining == 0:
+            history.set_batch_status(batch_id, "undone", f"Reversed {restored} move(s)")
+        else:
+            history.set_batch_status(
+                batch_id,
+                "undo_partial",
+                f"Reversed {restored}; {failed} failed, {skipped} skipped. Run Undo again after fixing the cause.",
+            )
+    except Exception:
+        # The filesystem work is done and reported in the result; a failed
+        # status write must not turn a completed restore into a crash. The
+        # 'undoing' journal rows remain for Recovery guidance.
+        logger.exception("Could not record the final undo status for batch %s", batch_id)
     return UndoResult(batch_id, restored, failed, skipped, removed, kept, tuple(messages))
 
 
