@@ -208,6 +208,16 @@ class App(ctk.CTk):
                 )
                 self.notify("Close cancelled: an operation is still finishing.")
                 return
-        self.ctx.watches.stop_all(timeout=3.0)  # bounded: a slow folder must not block closing
+        if not self.ctx.watches.stop_all(timeout=3.0):
+            # A watcher worker is still alive. Destroying the window (and then
+            # closing SQLite) underneath it could let it move files or write
+            # history after resources are released, so stay open.
+            dialogs.info(
+                self,
+                "Still finishing",
+                "Folder monitoring is still finishing its current check. Wait a moment, then close again.",
+            )
+            self.notify("Close cancelled: folder monitoring is still finishing.")
+            return
         logger.info("Application closing")
         self.destroy()

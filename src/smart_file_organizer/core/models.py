@@ -27,6 +27,7 @@ BATCH_WATCH = "watch"
 UNDO_DONE = "undone"
 UNDO_FAILED = "failed"
 UNDO_KEPT = "kept"
+UNDO_PENDING = "undoing"
 
 
 @dataclass(frozen=True)

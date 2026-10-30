@@ -21,7 +21,14 @@ from pathlib import Path
 from smart_file_organizer.utils.paths import normalise
 
 _locks: dict[str, threading.Lock] = {}
+_active: set[str] = set()
 _locks_guard = threading.Lock()
+
+
+def any_operation_active() -> bool:
+    """True while any organize/undo/watch operation holds a folder lock."""
+    with _locks_guard:
+        return bool(_active)
 
 
 def _lock_for(root: Path | str) -> threading.Lock:
@@ -40,8 +47,14 @@ def operation_lock(root: Path | str) -> Iterator[bool]:
     """
     lock = _lock_for(root)
     acquired = lock.acquire(blocking=False)
+    key = normalise(root)
+    if acquired:
+        with _locks_guard:
+            _active.add(key)
     try:
         yield acquired
     finally:
         if acquired:
+            with _locks_guard:
+                _active.discard(key)
             lock.release()

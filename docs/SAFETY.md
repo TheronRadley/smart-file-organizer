@@ -11,12 +11,12 @@ what it does not, and what to do when something goes wrong.
    switched on explicitly, after a confirmation dialog.
 2. **Dry runs change nothing.** A dry run performs the same validation as a real run,
    creates no folders, moves no files and writes no history.
-3. **Existing files are never overwritten.** Each move is created as a new hard link and
+3. **Existing files are not overwritten by any move this app performs.** Each move is created as a new hard link and
    only then is the original removed. Creating a link fails atomically if the destination
    exists. When hard links are unavailable, Windows uses its non-replacing rename primitive,
    while POSIX fails closed and leaves the source untouched rather than risking an overwrite
    (see *Limitations*).
-4. **A failed move never deletes a file it did not create.** If the original cannot be
+4. **A failed move does not delete a file it did not create** (within the identity limits below). If the original cannot be
    removed after the link was created, the extra link is removed again - but only after it
    has been proved, by device and inode, to still be the link this operation created *and*
    to still refer to the same file object as the source. If another program replaced that
@@ -152,3 +152,10 @@ and the status becomes *Stopped* on its own once the check has finished.
 If you find a way for the tool to move, overwrite or delete a file outside the folder you
 selected, or to overwrite an existing file, please report it privately through GitHub's
 security advisory feature instead of a public issue.
+- **Recovery states are explicit.** Undo journals its intent (`undoing`) before restoring each
+  file. If the outcome cannot be recorded, the batch is left as `undo_partial` and Recovery
+  guidance verifies the file against its recorded identity at its original or organized
+  location, and says plainly when a location can only be reported as unverified.
+- **One primary instance per data folder.** Startup recovery runs only in the instance that
+  holds the data folder's instance lock, so a second instance cannot mark the first instance's
+  in-progress work as interrupted.

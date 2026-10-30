@@ -26,6 +26,7 @@ from smart_file_organizer.core.models import (
     STATUS_PENDING,
     STATUS_SUCCESS,
     UNDO_FAILED,
+    UNDO_PENDING,
     BatchRecord,
     OperationRecord,
 )
@@ -36,7 +37,7 @@ SEVERITY_ATTENTION = "attention"
 SEVERITY_INFO = "info"
 
 # Batch statuses that can still hold an operation needing a decision.
-UNFINISHED_BATCH_STATUSES = ("running", "interrupted", "partial", "cancelled")
+UNFINISHED_BATCH_STATUSES = ("running", "interrupted", "partial", "cancelled", "undo_partial")
 
 
 class RecoveryError(RuntimeError):
@@ -66,7 +67,7 @@ class RecoveryStep:
         return f"{self.title}: {self.detail} Next step: {self.next_action}"
 
 
-def unfinished_batches(history: HistoryRepository, *, limit: int = 200) -> list[BatchRecord]:
+def unfinished_batches(history: HistoryRepository, *, limit: int | None = None) -> list[BatchRecord]:
     """Batches that ended running, interrupted, partly applied or cancelled."""
     return [batch for batch in history.list_batches(limit) if batch.status in UNFINISHED_BATCH_STATUSES]
 
@@ -90,6 +91,8 @@ def _step_for(operation: OperationRecord) -> RecoveryStep | None:
         return _failed(operation)
     if operation.status == STATUS_SUCCESS and operation.undo_status == UNDO_FAILED:
         return _undo_failed(operation)
+    if operation.status == STATUS_SUCCESS and operation.undo_status == UNDO_PENDING:
+        return _undo_unresolved(operation)
     return None
 
 
@@ -158,3 +161,34 @@ def _exists(path: str) -> bool:
         return os.path.lexists(path)
     except (OSError, ValueError):
         return False
+
+
+def _undo_unresolved(operation: OperationRecord) -> RecoveryStep:
+    """An undo was journaled but its outcome was never recorded.
+
+    The file's current location is verified against the recorded identity
+    where possible; the outcome is stated as verified only when the file at a
+    recorded location still carries the recorded identity.
+    """
+    from smart_file_organizer.core.scanner import file_identity
+
+    original, current = operation.source_path or "", operation.destination_path or ""
+    verified_at = ""
+    for label, path in (("original", original), ("organized", current)):
+        try:
+            stats = os.lstat(path)
+        except OSError:
+            continue
+        if operation.file_id is None or file_identity(stats, path) == operation.file_id:
+            verified_at = label
+            break
+    if verified_at == "original":
+        detail = f"the undo outcome was not recorded, but the file is verified back at '{original}'."
+        action = "Nothing more is needed for this file; the undo record can be ignored."
+    elif verified_at == "organized":
+        detail = f"the undo outcome was not recorded; the file is verified still at '{current}'."
+        action = "Run Undo again to restore it, or leave it where it is."
+    else:
+        detail = "the undo outcome was not recorded and the file could not be verified at either recorded location."
+        action = f"Check '{original}' and '{current}' manually before running Undo again."
+    return RecoveryStep(operation, SEVERITY_ATTENTION, "Unrecorded undo outcome", detail, action)

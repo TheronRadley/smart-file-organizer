@@ -204,3 +204,43 @@ def test_locked_database_is_not_treated_as_corrupt(tmp_path: Path, monkeypatch: 
         open_database(path)
     assert path.exists()
     assert not list(tmp_path.glob("*.corrupt-*"))
+
+
+def test_clear_is_refused_while_a_file_operation_is_active(workspace: Path, history: HistoryRepository) -> None:
+    from smart_file_organizer.core.operation_guard import operation_lock
+
+    history.create_batch("organize", workspace)
+    with operation_lock(workspace) as acquired:
+        assert acquired
+        with pytest.raises(RuntimeError, match="cannot be cleared"):
+            history.clear()
+    assert history.count_batches() == 1, "the records must survive a refused clear"
+    history.clear()
+    assert history.count_batches() == 0
+
+
+def test_history_export_is_not_capped_at_200_batches(
+    workspace: Path, history: HistoryRepository, tmp_path: Path
+) -> None:
+    from smart_file_organizer.core.export import history_export
+
+    for _ in range(205):
+        history.create_batch("organize", workspace)
+    export = history_export(history)
+    assert export.summary["batches"] == 205
+
+
+def test_second_instance_cannot_acquire_the_lock(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("Lock semantics differ on Windows; covered by the primary-instance path")
+    from smart_file_organizer.core.instance import try_acquire_instance_lock
+
+    first = try_acquire_instance_lock(tmp_path)
+    assert first is not None
+    try:
+        assert try_acquire_instance_lock(tmp_path) is None, "a second live instance must not run startup recovery"
+    finally:
+        first.close()
+    third = try_acquire_instance_lock(tmp_path)
+    assert third is not None
+    third.close()

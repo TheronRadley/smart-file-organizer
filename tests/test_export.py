@@ -245,3 +245,27 @@ def test_partial_copy_during_publication_is_removed_and_reported(
     assert not list(tmp_path.glob("*.tmp")) and not list(tmp_path.glob(".*.tmp")), (
         "no temporary or partial export file may be left behind"
     )
+
+
+def test_export_cleanup_never_deletes_a_replacement_created_during_copying(
+    tmp_path: Path, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.core import export as export_module
+
+    target = tmp_path / "history.csv"
+
+    def fail_link(source, destination, *args, **kwargs):
+        raise OSError(18, "Invalid cross-device link")
+
+    def copy_then_replaced(source_handle, destination_handle, *args, **kwargs):
+        destination_handle.write(b"partial")
+        destination_handle.close()
+        target.unlink()
+        target.write_bytes(b"unrelated replacement")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(export_module.os, "link", fail_link)
+    monkeypatch.setattr(export_module.shutil, "copyfileobj", copy_then_replaced)
+    with pytest.raises(ExportError):
+        write_export(history_export(history), target)
+    assert target.read_bytes() == b"unrelated replacement", "cleanup must not delete another process's file"

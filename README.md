@@ -32,7 +32,7 @@ first, recorded in history, and reversible.
 Most organizers move first and explain later. This one is built the other way around:
 
 - **Preview before anything moves.** Scan a folder, inspect the exact plan, run a dry run, then apply only the moves you selected.
-- **Nothing is ever overwritten or deleted.** Collisions are renamed (`name (2).ext`) or skipped - your existing files are never replaced.
+- **Built to never overwrite or delete.** Collisions are renamed (`name (2).ext`) or skipped, moves are identity-checked at the moment they run, and anything that cannot be verified fails closed - see [Safety](docs/SAFETY.md) for the exact guarantees and their limits.
 - **Every move can be undone.** Batches are recorded in a local history and reversed only when every file is exactly where it was left; otherwise nothing changes and you are told why.
 - **Private by design.** Everything runs on your machine. No accounts, no network requests, no telemetry.
 
@@ -52,7 +52,7 @@ Most organizers move first and explain later. This one is built the other way ar
 - Symbolic links and Windows junctions are never followed
 - Source files are re-validated by identity immediately before each move
 - Exports refuse to silently overwrite an existing report
-- A stopped watcher moves nothing further - and never runs two workers
+- A stopped watcher starts no new moves and never runs two workers (a single file operation already in progress may finish)
 
 The full guarantees, limits, and threat model live in **[docs/SAFETY.md](docs/SAFETY.md)**.
 

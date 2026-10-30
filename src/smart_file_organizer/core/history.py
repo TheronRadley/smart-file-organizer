@@ -56,8 +56,11 @@ class HistoryRepository:
         rows = self._db.query("SELECT COUNT(*) AS n FROM batches")
         return int(rows[0]["n"])
 
-    def list_batches(self, limit: int = 200) -> list[BatchRecord]:
-        rows = self._db.query(_BATCH_SELECT + " ORDER BY b.created_at DESC LIMIT ?", (limit,))
+    def list_batches(self, limit: int | None = 200) -> list[BatchRecord]:
+        if limit is None:
+            rows = self._db.query(_BATCH_SELECT + " ORDER BY b.created_at DESC")
+        else:
+            rows = self._db.query(_BATCH_SELECT + " ORDER BY b.created_at DESC LIMIT ?", (limit,))
         return [_batch_from_row(row) for row in rows]
 
     # ----- operations ----------------------------------------------------
@@ -193,7 +196,17 @@ class HistoryRepository:
         return int(rows[0]["total"])
 
     def clear(self) -> None:
-        """Delete history records only. User files are never touched."""
+        """Delete history records only. User files are never touched.
+
+        Refused while any file operation is active: clearing a pending move's
+        record would let it finish with no history and no way to undo it.
+        """
+        from smart_file_organizer.core.operation_guard import any_operation_active
+
+        if any_operation_active():
+            raise RuntimeError(
+                "History cannot be cleared while a file operation is running. Wait for it to finish, then try again."
+            )
         with self._db.transaction() as connection:
             connection.execute("DELETE FROM operations")
             connection.execute("DELETE FROM batches")

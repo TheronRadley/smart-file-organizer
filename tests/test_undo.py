@@ -212,3 +212,50 @@ def test_undo_refuses_when_the_organized_path_points_outside_the_folder(
         undo_batch(batch_id, history)
     assert outside.read_bytes() == b"outside content"
     assert not (workspace / "report.pdf").exists()
+
+
+def test_undo_failure_to_record_outcome_leaves_batch_recoverable(
+    workspace: Path, options, classifier, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from smart_file_organizer.core.models import UNDO_DONE
+    from smart_file_organizer.core.recovery import recovery_steps
+
+    make_file(workspace / "a.pdf", b"payload")
+    plan = build_plan(scan_folder(workspace, options, classifier), classifier)
+    outcome = execute_plan(plan, history=history)
+    assert outcome.batch_id is not None
+    real_set = history.set_undo_result
+
+    def fail_done(operation_id, status, error=None):
+        if status == UNDO_DONE:
+            raise sqlite3.OperationalError("database is locked")
+        return real_set(operation_id, status, error)
+
+    monkeypatch.setattr(history, "set_undo_result", fail_done)
+    result = undo_batch(outcome.batch_id, history)
+
+    assert result.restored == 1
+    assert (workspace / "a.pdf").read_bytes() == b"payload"
+    batch = history.get_batch(outcome.batch_id)
+    assert batch is not None and batch.status == "undo_partial", "an unrecorded undo must not look completed"
+    monkeypatch.undo()
+    steps = recovery_steps(outcome.batch_id, history)
+    assert any("undo" in step.title.lower() for step in steps), "recovery guidance must surface the unresolved undo"
+
+
+def test_undo_honours_cancellation_before_restoring(
+    workspace: Path, options, classifier, history: HistoryRepository
+) -> None:
+    import threading
+
+    make_file(workspace / "a.pdf", b"payload")
+    plan = build_plan(scan_folder(workspace, options, classifier), classifier)
+    outcome = execute_plan(plan, history=history)
+    assert outcome.batch_id is not None
+    cancel = threading.Event()
+    cancel.set()
+    result = undo_batch(outcome.batch_id, history, cancel_event=cancel)
+    assert result.restored == 0
+    assert (workspace / "Documents" / "a.pdf").exists()

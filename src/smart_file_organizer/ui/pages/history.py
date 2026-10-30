@@ -157,7 +157,7 @@ class HistoryPage(BasePage):
             return
 
         def work(task: TaskContext):
-            return undo_batch(batch.id, self.ctx.history)
+            return undo_batch(batch.id, self.ctx.history, cancel_event=task.cancel_event)
 
         def success(result) -> None:
             self.notify(f"Undo finished: {result.restored} restored, {result.failed} failed, {result.skipped} skipped.")
@@ -225,7 +225,16 @@ class HistoryPage(BasePage):
             "to undo past batches.",
         ):
             return
-        self.ctx.history.clear()
+        if self.runner.any_busy():
+            dialogs.info(
+                self, "Operation in progress", "Wait for the running operation to finish before clearing history."
+            )
+            return
+        try:
+            self.ctx.history.clear()
+        except RuntimeError as exc:
+            dialogs.error(self, "Cannot clear history yet", str(exc))
+            return
         self.refresh()
         self.notify("History cleared. Your files were not changed.")
 
