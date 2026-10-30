@@ -293,13 +293,18 @@ def _publish_no_overwrite(temporary: Path, target: Path) -> None:
                 created_stats: os.stat_result | None = os.fstat(destination_handle.fileno())
             except (OSError, ValueError):
                 created_stats = None
+            # Compared BEFORE closing: closing flushes buffered data, which can
+            # update the change time and make our own file look like a stranger.
+            try:
+                current = os.lstat(target)
+            except OSError:
+                current = None
+            same_file = (
+                created_stats is not None and current is not None and _is_same_export_file(current, created_stats)
+            )
             destination_handle.close()
             if created_stats is not None:
-                try:
-                    current = os.lstat(target)
-                except OSError:
-                    current = None
-                if current is not None and _is_same_export_file(current, created_stats):
+                if same_file:
                     try:
                         target.unlink()
                     except OSError as cleanup_exc:
