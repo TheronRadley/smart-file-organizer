@@ -279,23 +279,21 @@ def _publish_no_overwrite(temporary: Path, target: Path) -> None:
         # Exclusive-create copy. If the copy fails halfway (disk full, target
         # removed), the incomplete destination this call created is removed:
         # a partial report must never sit at the target looking complete.
-        destination_handle = None
+        destination_handle = open(target, "xb")  # noqa: SIM115 - closed explicitly below (identity needed)
         try:
             with open(temporary, "rb") as source:
-                destination_handle = open(target, "xb")  # noqa: SIM115 - closed explicitly below (identity needed)
-                try:
-                    shutil.copyfileobj(source, destination_handle)
-                finally:
-                    # Identity of the file WE created, read from its own handle
-                    # at failure time. If the target path was replaced during
-                    # copying, the path now names a different file: never delete it.
-                    try:
-                        created_stats: os.stat_result | None = os.fstat(destination_handle.fileno())
-                    except (OSError, ValueError):
-                        created_stats = None
-                    destination_handle.close()
-                    destination_handle = None
+                shutil.copyfileobj(source, destination_handle)
         except BaseException:
+            # Decide while OUR handle is still open: compare the path's current
+            # file against the file this handle refers to. If the path was
+            # replaced during copying, it names a different file (possibly even
+            # reusing the inode, hence the change-time comparison) and must
+            # never be deleted by this cleanup.
+            try:
+                created_stats: os.stat_result | None = os.fstat(destination_handle.fileno())
+            except (OSError, ValueError):
+                created_stats = None
+            destination_handle.close()
             if created_stats is not None:
                 try:
                     current = os.lstat(target)
@@ -315,9 +313,7 @@ def _publish_no_overwrite(temporary: Path, target: Path) -> None:
                         f"Incomplete export at '{target}' was replaced during copying and left in place",
                     ) from None
             raise
-        finally:
-            if destination_handle is not None:
-                destination_handle.close()
+        destination_handle.close()
     temporary.unlink()
 
 
