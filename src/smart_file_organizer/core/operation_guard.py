@@ -1,15 +1,4 @@
-"""Coordinated, per-folder locking for operations that move files.
-
-Manual organization, guarded undo, and watcher-applied batches must never
-modify the same folder at the same time: two batches racing on one tree could
-act on each other's half-moved state. This module provides one non-blocking
-lock per normalized root path, shared by every entry point that moves files.
-Operations on *different* folders still run in parallel.
-
-The lock is advisory and process-local: it coordinates this application's own
-operations, not other programs (those are handled by identity re-validation at
-the move boundary).
-"""
+"""Process-local coordination for file operations and maintenance of their journal."""
 
 from __future__ import annotations
 
@@ -18,43 +7,55 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from smart_file_organizer.core.boundary import storage_identity
 from smart_file_organizer.utils.paths import normalise
 
-_locks: dict[str, threading.Lock] = {}
-_active: set[str] = set()
-_locks_guard = threading.Lock()
-
-
-def any_operation_active() -> bool:
-    """True while any organize/undo/watch operation holds a folder lock."""
-    with _locks_guard:
-        return bool(_active)
-
-
-def _lock_for(root: Path | str) -> threading.Lock:
-    key = normalise(root)
-    with _locks_guard:
-        return _locks.setdefault(key, threading.Lock())
+_guard = threading.Lock()
+_active: dict[Path, tuple[str | None, set[str]]] = {}
+_clearing = False
 
 
 @contextmanager
 def operation_lock(root: Path | str) -> Iterator[bool]:
-    """Try to hold the move lock for ``root``; yields False when already held.
-
-    Non-blocking by design: a second operation on the same folder is reported
-    to the user (or skipped) instead of queueing up behind a long batch and
-    then acting on stale previews.
-    """
-    lock = _lock_for(root)
-    acquired = lock.acquire(blocking=False)
-    key = normalise(root)
-    if acquired:
-        with _locks_guard:
-            _active.add(key)
+    """Nonblocking: independent trees can move in parallel, but overlapping ones cannot."""
+    key = Path(normalise(root))
+    root_identity = _identity(key)
+    ancestors = {identity for parent in key.parents if (identity := _identity(parent)) is not None}
+    with _guard:
+        acquired = not _clearing and not any(
+            key.is_relative_to(other)
+            or other.is_relative_to(key)
+            or (root_identity is not None and (root_identity == other_id or root_identity in other_ancestors))
+            or (other_id is not None and other_id in ancestors)
+            for other, (other_id, other_ancestors) in _active.items()
+        )
+        if acquired:
+            _active[key] = (root_identity, ancestors)
     try:
         yield acquired
     finally:
         if acquired:
-            with _locks_guard:
-                _active.discard(key)
-            lock.release()
+            with _guard:
+                del _active[key]
+
+
+@contextmanager
+def history_clear_lock() -> Iterator[None]:
+    """Reserve an idle journal until the history deletion transaction finishes."""
+    global _clearing
+    with _guard:
+        if _active or _clearing:
+            raise RuntimeError("History cannot be cleared while a file operation is running. Wait and try again.")
+        _clearing = True
+    try:
+        yield
+    finally:
+        with _guard:
+            _clearing = False
+
+
+def _identity(path: Path) -> str | None:
+    try:
+        return storage_identity(path.stat())
+    except OSError:
+        return None

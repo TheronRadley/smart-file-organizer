@@ -7,6 +7,7 @@ safety rules, read [SAFETY.md](SAFETY.md).
 
 - **Installed build:** run `SmartFileOrganizer.exe` (see the README for how to build it yourself).
 - **From source:** `python app.py`, from the project folder, inside your virtual environment.
+  See [Quick start](../README.md#quick-start) for Python and Tcl/Tk prerequisites.
 
 The sidebar lists the pages: Dashboard, Organize Files, Duplicate Finder, Large Files, Automation,
 History, Settings and About. The app opens in the dark theme unless you change it in Settings.
@@ -21,7 +22,7 @@ You can cancel a scan at any time; the results shown are then marked incomplete.
 - Hidden files, temporary files and common junk (`.*`, `*.tmp`, `*.part`, `*.crdownload`, `~$*`,
   `desktop.ini`, `Thumbs.db`) are excluded by default, along with the folders `.git`,
   `node_modules`, `__pycache__`, `.venv` and `venv`. Change these lists in Settings.
-- Symbolic links and junctions are never followed. They are counted and listed as skipped.
+- Detected symbolic links and junctions are skipped. The active app data folder is excluded.
 - Unreadable items are reported as issues with a plain-language reason. The scan keeps going.
 
 ## Dashboard
@@ -33,30 +34,30 @@ page is sample data.
 ## Organize Files
 
 1. Choose a folder and scan it.
-2. Choose how to organize, in Settings: **by type** (Documents, Images, Videos, Audio, Archives,
-   Code, Spreadsheets, Presentations, Executables, Fonts, and Other), **by extension**, or **by date**
-   (modified month). Destination folder names can be changed in Settings.
-3. Press **Build preview**. Every file gets a row with its status:
+2. In **Preview & apply**, choose a mode (**By file type**, **By extension**, or **By modified month**)
+   and a collision rule. Settings provides the initial defaults, category folders, and exclusions.
+3. On that tab, press **Build preview**. Every file gets a row with its status:
    - *ready*: will be moved to the shown destination, possibly with a new name;
    - *skipped*: left where it is, with the reason (for example, already in the right place, in a
      disabled category, or the file is inside an organized folder).
-4. Use the search box, the extension filter and the minimum/maximum size filter to narrow the list.
-   **Select all ready** selects every ready row.
+4. Select the rows to move on **Preview & apply**. **Select all ready** selects every ready row.
+   The search, extension, and size filters on **Files** affect that list only, not the move selection.
 5. Press **Dry run** to see the result without changing anything. A dry run writes nothing to
    History and creates no folders.
 6. Select the rows you want, press **Apply selected…**, and confirm. Each file is moved one at a time,
-   and the outcome for each is shown as success, skipped or failed.
+    and the outcome for each is shown as success, skipped or failed.
 
 **Collisions.** If a file with the same name already exists at the destination, the default
-(*rename*) saves the new file as `name (2).ext`, `name (3).ext` and so on. The other option, set in
-Settings, is *skip*. No existing file is ever overwritten.
+(*rename*) proposes `name (2).ext`, `name (3).ext`, and so on. The other option is *skip*. If another
+program takes a name after you have previewed it, rebuild the preview before applying that move.
 
 **Partial batches.** If some moves fail, the batch finishes as *partial*. The files that succeeded
 stay moved, and the failures explain why. You can fix the cause (for example, close the program
 that has the file open) and organize again from a fresh scan.
 
-**Cancelling.** Cancelling during apply stops before the next file. Files already moved stay moved,
-and the batch is recorded as *cancelled*.
+**Cancelling.** Press **Cancel apply** on **Preview & apply**. The current file operation can finish;
+files already moved stay moved. The batch is recorded as *cancelled* unless there is an unresolved
+outcome that needs recovery.
 
 ## Duplicate Finder
 
@@ -94,15 +95,15 @@ Automation watches folders you add and handles new or changed files once they st
 3. Files are only considered after their size and modification time have been stable for about
    10 seconds, and the folder is checked about every 5 seconds.
 4. By default the watcher is in **preview mode**: stable files appear under *Waiting for approval*.
-   Press **Apply waiting files…** to move the ones you approve. A file that changed after it was
-   listed is not moved; it is listed again when it becomes stable.
+   **Apply waiting files…** applies the displayed list, not new arrivals. Changed files and occupied
+   destinations are skipped and need a fresh approval. Editing watcher rules clears old approvals.
 5. **Organize automatically (no preview)** is off by default. Turning it on asks for confirmation.
    With it on, stable files are moved without asking, under the same collision, exclusion and
-   revalidation rules, and every move is recorded and can be undone.
+   revalidation rules. The app records move intent before applying it. See *History* for undo and recovery.
 6. **Pause** and **Resume** keep the folder list. **Stop** ends monitoring. **Remove selected** removes a folder.
-   Stopping is immediate: a check that is already running finishes without moving anything else,
-   and the status shows *Stopping* until it has. While it shows *Stopping*, starting again is
-   refused rather than running two watchers at once; the status becomes *Stopped* by itself.
+   Stop signals all watchers immediately without blocking the window. A file operation already in
+   progress can finish; *Stopping* changes to *Stopped* once the worker has exited. Start won't
+   launch another worker while that folder is still stopping.
 7. Monitoring only runs while the app is open. Closing the app stops it.
 
 The activity log on the page lists what the watcher did during this session.
@@ -114,24 +115,21 @@ Every real organize operation is listed as a batch, with its status (*completed*
 source, destination and **Error / reason**. Dry runs are not recorded.
 
 - **Undo selected batch…** reverses a batch. Undo is guarded:
-  - It lists the files it would move back. If any file was edited, renamed, moved or deleted
-    afterwards, or its original location is now occupied, **undo is refused and nothing is changed**.
-    The page lists the reasons.
-  - When it runs, it removes folders the batch created, but only if they are empty.
-- **Recovery guidance…** is for batches that did not finish cleanly (*interrupted*, *partial*,
-  *cancelled*). For each unfinished move it checks where the file actually is and tells you the
-  safe next step:
-  - at the original location only - the move never happened, nothing was lost;
-  - at the new location only - the move finished but was not recorded, so Undo cannot reverse it;
-  - at both - the interrupted move left two copies; both paths are named so you can compare them
-    and delete one yourself. **Neither is deleted for you**, because either could be the newer one;
-  - at neither - another program moved, renamed or deleted it; find it before running anything else.
-
-  The guidance is also shown automatically when you select a batch with one of those statuses.
+  - It checks the recorded files it would move back. If any fails preflight because it was edited,
+    renamed, moved or deleted, or its original location is occupied, **Undo is refused** and the
+    page lists the reasons. No files are changed when preflight fails.
+  - Undo can be partial if a file changes after preflight or you close the app while it runs. It
+    removes only empty folders it can verify this batch created.
+- **Recovery guidance…** shows unresolved moves and restores, even if a batch was previously
+  marked completed. For each recorded path it says whether the file is verified, missing, or
+  unverified. If a move wasn't recorded, Undo cannot reverse it. If either path is uncertain,
+  check both before retrying or deleting anything. See [Safety](SAFETY.md#if-something-goes-wrong).
 - **Export history…** writes every recorded batch and operation to a CSV or JSON file you choose.
   CSV is written as UTF-8 with a byte order mark so spreadsheet applications read non-ASCII paths.
-  Exporting changes nothing.
-- **Clear history…** deletes the history records only. It never deletes or moves your files.
+  Exporting does not change history. A new report won't replace a file that appears at its path;
+  replacing an existing file requires explicit confirmation.
+- **Clear history…** deletes records only, not files. You cannot clear history while moves or
+  restores are running. Clearing it removes the ability to undo or get guidance for those batches.
 - **Refresh** reloads the list.
 
 ## Settings
@@ -145,10 +143,12 @@ source, destination and **Error / reason**. Dry runs are not recorded.
 - **Disabled categories:** categories that are never moved.
 - **Extension overrides:** assign a specific extension to a category.
 - **Large-file minimum (MB)** and **watch interval** for monitoring.
-- **Save settings** writes `settings.json`. **Restore defaults…** resets everything.
+- **Save settings** writes `settings.json`. **Restore defaults…** keeps the monitored folder list,
+  resets other options, and switches active watchers back to preview mode.
 - **Open data folder** opens the folder holding settings, history and the log.
 
-Settings are saved in your user profile, normally `%APPDATA%\SmartFileOrganizer\`.
+Settings are saved in your user profile, normally `%APPDATA%\SmartFileOrganizer\`. This folder
+(or `SFO_DATA_DIR` if you set it) is excluded from scans and can't be organized.
 
 ## About
 
@@ -167,7 +167,8 @@ one is started. Your files are not affected.
 
 ## Troubleshooting
 
-- **"Undo refused"**: the reasons list which files changed. Restore those by hand, then try again.
+- **"Undo refused"**: read the reasons and check both paths before changing anything. Use
+  **Recovery guidance…** if the app could not record a move or restore outcome.
 - **Preview looks out of date**: scan again. A preview is a snapshot, and every move is re-checked before it runs.
 - **A file is skipped as "in the way"**: a file or link exists where a destination folder should be.
   Rename or move that item, then rebuild the preview.

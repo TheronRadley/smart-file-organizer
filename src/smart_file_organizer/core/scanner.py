@@ -10,10 +10,12 @@ import ctypes
 import fnmatch
 import logging
 import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
-from threading import Event
 
+from smart_file_organizer.core.boundary import is_reparse_entry, storage_identity
+from smart_file_organizer.core.cancellation import Cancellation
 from smart_file_organizer.core.classifier import Classifier, extension_of
 from smart_file_organizer.core.models import (
     FileEntry,
@@ -22,7 +24,7 @@ from smart_file_organizer.core.models import (
     ScanProgress,
     ScanResult,
 )
-from smart_file_organizer.utils.paths import is_link_like, is_within, protected_root_reason
+from smart_file_organizer.utils.paths import app_data_dir, is_link_like, is_within, protected_root_reason
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,7 @@ def scan_folder(
     classifier: Classifier | None = None,
     *,
     progress: ProgressCallback | None = None,
-    cancel_event: Event | None = None,
+    cancel_event: Cancellation | None = None,
 ) -> ScanResult:
     """Scan ``root`` and return every regular file found.
 
@@ -56,8 +58,14 @@ def scan_folder(
         )
     if is_link_like(root_path):
         raise ScanError(f"'{root_path}' is a symbolic link. Choose the real folder instead.")
-    if not root_path.is_dir():
-        raise ScanError(f"'{root_path}' is not an existing folder.")
+    try:
+        root_stats = root_path.lstat()
+    except OSError as exc:
+        raise ScanError(f"Cannot scan '{root_path}': {describe_os_error(exc)}.") from exc
+    if not stat.S_ISDIR(root_stats.st_mode) or is_reparse_entry(root_stats):
+        raise ScanError(f"'{root_path}' is not a plain folder.")
+    root_id = storage_identity(root_stats)
+    data_dir = app_data_dir()
 
     active_classifier = classifier or Classifier()
     excluded_folders = {name.casefold() for name in options.excluded_folders}
@@ -72,14 +80,29 @@ def scan_folder(
         skipped_excluded=0,
         skipped_other=0,
         issues=[],
+        root_identity=root_id,
     )
 
     pending_dirs: list[tuple[Path, str]] = [(root_path, "")]
     while pending_dirs:
+        if cancel_event is not None and cancel_event.is_set():
+            result.cancelled = True
+            return result
         directory, prefix = pending_dirs.pop()
         try:
+            directory_stats = directory.lstat()
+            if directory == root_path and storage_identity(directory_stats) != root_id:
+                raise ScanError("The selected folder changed during the scan.")
+            if is_reparse_entry(directory_stats) or not is_within(directory, root_path):
+                result.skipped_links += 1
+                continue
+            if is_within(directory, data_dir):
+                result.skipped_excluded += 1
+                continue
             with os.scandir(directory) as iterator:
                 children = sorted(iterator, key=lambda child: child.name)
+        except ScanError:
+            raise
         except OSError as exc:
             result.issues.append(ScanIssue(str(directory), describe_os_error(exc)))
             continue
@@ -96,7 +119,11 @@ def scan_folder(
                 continue
 
             if child.is_dir(follow_symlinks=False):
-                if child.name.casefold() in excluded_folders or _matches(child.name, patterns):
+                if (
+                    child.name.casefold() in excluded_folders
+                    or _matches(child.name, patterns)
+                    or is_within(child_path, data_dir)
+                ):
                     result.skipped_excluded += 1
                     continue
                 if not is_within(child_path, root_path):
@@ -116,6 +143,12 @@ def scan_folder(
                     stats = child.stat(follow_symlinks=False)
                 except OSError as exc:
                     result.issues.append(ScanIssue(str(child_path), describe_os_error(exc)))
+                    continue
+                if is_reparse_entry(stats):
+                    result.skipped_links += 1
+                    continue
+                if not stat.S_ISREG(stats.st_mode):
+                    result.skipped_other += 1
                     continue
                 result.entries.append(_make_entry(child_path, relative, child.name, stats, active_classifier))
                 if progress is not None and len(result.entries) % PROGRESS_INTERVAL == 0:

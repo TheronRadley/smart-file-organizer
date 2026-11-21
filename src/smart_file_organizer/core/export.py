@@ -1,8 +1,7 @@
 """Exports for auditing and recovery: history, scan results and duplicate reports.
 
-Everything here is read-only. An export never changes history and never touches
-the files that were organized; it only writes a report to a path the user
-chooses.
+An export reads the report data and writes it to the user's chosen path. It
+does not update history or settings.
 
 CSV files are written as UTF-8 with a byte order mark, because spreadsheet
 applications otherwise assume a legacy encoding and mangle non-ASCII paths.
@@ -14,30 +13,31 @@ prefixed with an apostrophe so Excel/LibreOffice treat it as text, not a
 formula. CSV quoting alone would not prevent that. JSON is not sanitized,
 because it is not opened as a spreadsheet.
 
-Exports never silently replace an existing file. ``overwrite`` must be passed
-explicitly (the save dialog's own overwrite prompt is that confirmation in the
-UI); the report is written to a uniquely named temporary file in the target
-folder and published without clobbering a file that appears in the meantime.
+New targets are always published without clobbering an existing file. An
+explicit replacement is tied to a snapshot of the existing regular file, which
+is rechecked before publishing the report.
 """
 
 from __future__ import annotations
 
 import csv
-import errno
 import json
 import logging
 import os
-import shutil
+import stat
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
+from smart_file_organizer.core.boundary import is_reparse_entry, storage_identity
 from smart_file_organizer.core.duplicates import DuplicateReport
+from smart_file_organizer.core.fileops import rename_no_replace
 from smart_file_organizer.core.history import HistoryRepository
 from smart_file_organizer.core.models import ScanResult
+from smart_file_organizer.utils.paths import app_data_dir, is_within
 
 logger = logging.getLogger(__name__)
 
@@ -193,43 +193,86 @@ def duplicates_export(report: DuplicateReport) -> Export:
     )
 
 
-def write_export(export: Export, path: Path | str, *, overwrite: bool = False) -> Path:
-    """Write ``export`` to ``path``; the format comes from the file extension.
+@dataclass(frozen=True)
+class ExportTarget:
+    path: Path
+    signature: tuple[int, int, int, int, int]
 
-    An existing target is never replaced silently: without ``overwrite=True``
-    the write is refused, including when another process creates the target
-    while the report is being written. Pass ``overwrite=True`` only after the
-    user has explicitly confirmed replacing that exact file.
+
+def inspect_export_target(path: Path | str) -> ExportTarget | None:
+    """Capture the exact file that would be replaced, or None for a new path."""
+    path = Path(path).absolute()
+    if is_within(path, app_data_dir()):
+        raise ExportError("Choose a report path outside the application's data folder.")
+    try:
+        stats = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ExportError(f"Could not write to '{path}': {exc.strerror or exc}") from exc
+    if not stat.S_ISREG(stats.st_mode) or is_reparse_entry(stats):
+        kind = "a folder" if stat.S_ISDIR(stats.st_mode) else "a link or special file"
+        raise ExportError(f"'{path}' is {kind}. Choose a regular file name to write the report to.")
+    if not stats.st_ino:
+        raise ExportError(f"Cannot verify the identity of '{path}'. Choose a new export name.")
+    return ExportTarget(path, (stats.st_dev, stats.st_ino, stats.st_size, stats.st_mtime_ns, stats.st_ctime_ns))
+
+
+def write_export(
+    export: Export, path: Path | str, *, overwrite: bool = False, replace_existing: ExportTarget | None = None
+) -> Path:
+    """Publish a report without clobbering an unapproved target.
+
+    UI callers pass a snapshot captured *before* explicit replacement consent.
+    ``overwrite=True`` is for non-interactive callers that authorize replacing
+    the file present at entry. It can never authorize a newly appearing file.
     """
-    target = Path(path)
+    chosen = Path(path)
+    target = chosen.absolute()
     suffix = target.suffix.lower()
     if suffix not in EXPORT_SUFFIXES:
         raise ExportError(f"'{target.name}' is not a supported export file. Choose a name ending in .csv or .json.")
-    if target.is_dir():
-        # os.replace() would happily swap an empty folder for the report file.
-        raise ExportError(f"'{target}' is a folder. Choose a file name to write the report to.")
-    if not overwrite and os.path.lexists(target):
+    existing = inspect_export_target(target)
+    if replace_existing is None and overwrite:
+        replace_existing = existing
+    if replace_existing is not None:
+        if existing != replace_existing:
+            raise ExportError(f"'{target.name}' has changed since you chose it. Nothing was replaced.")
+    elif existing is not None:
         raise ExportError(
             f"'{target.name}' already exists and was not changed. Choose another name, or confirm overwriting it."
         )
     temporary: Path | None = None
+    temporary_id: str | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # A uniquely named temporary in the target folder: concurrent exports to
         # the same target cannot corrupt each other through a shared ".tmp" file.
         descriptor, temporary_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-        os.close(descriptor)
         temporary = Path(temporary_name)
-        if suffix == CSV_SUFFIX:
-            _write_csv(export, temporary)
-        else:
-            _write_json(export, temporary)
-        if overwrite:
+        encoding = UTF8_BOM if suffix == CSV_SUFFIX else "utf-8"
+        with os.fdopen(descriptor, "w", encoding=encoding, newline="") as stream:
+            temporary_id = storage_identity(os.fstat(stream.fileno()))
+            if suffix == CSV_SUFFIX:
+                _write_csv(export, stream)
+            else:
+                _write_json(export, stream)
+        if not _is_owned_temporary(temporary, temporary_id):
+            raise ExportError(f"The temporary report '{temporary}' could not be verified; left in place.")
+        if is_within(target, app_data_dir()):
+            raise ExportError("Choose a report path outside the application's data folder.")
+        if replace_existing is not None:
+            try:
+                still_approved = inspect_export_target(target) == replace_existing
+            except ExportError:
+                still_approved = False
+            if not still_approved:
+                raise ExportError(f"'{target.name}' changed while writing the report. Nothing was replaced.")
             os.replace(temporary, target)
             temporary = None
         else:
             try:
-                _publish_no_overwrite(temporary, target)
+                rename_no_replace(temporary, target)
             except FileExistsError as exc:
                 raise ExportError(
                     f"'{target.name}' already exists and was not changed. "
@@ -244,89 +287,23 @@ def write_export(export: Export, path: Path | str, *, overwrite: bool = False) -
     finally:
         if temporary is not None:
             with suppress(OSError):
-                temporary.unlink(missing_ok=True)
+                if _is_owned_temporary(temporary, temporary_id):
+                    temporary.unlink()
     logger.info("Exported %d %s row(s) to %s", len(export.rows), export.kind, target)
-    return target
+    return chosen
 
 
-def _is_same_export_file(current: os.stat_result, created: os.stat_result) -> bool:
-    """Storage-identity check so cleanup never deletes a replacement file.
-
-    Device+inode alone is not enough (a replacement can reuse the inode), so
-    the creation/change time reported by the file's own handle must match too.
-    """
-    if not current.st_ino or not created.st_ino:
+def _is_owned_temporary(path: Path, expected: str | None) -> bool:
+    if expected is None or is_within(path, app_data_dir()):
         return False
-    return (current.st_dev, current.st_ino, current.st_ctime_ns) == (
-        created.st_dev,
-        created.st_ino,
-        created.st_ctime_ns,
-    )
+    stats = path.lstat()
+    return stat.S_ISREG(stats.st_mode) and not is_reparse_entry(stats) and storage_identity(stats) == expected
 
 
-def _publish_no_overwrite(temporary: Path, target: Path) -> None:
-    """Publish ``temporary`` as ``target`` only if ``target`` is still free.
-
-    A hard link is atomic: it fails with :class:`FileExistsError` instead of
-    replacing a file another process created meanwhile. Filesystems without
-    hard links fall back to an exclusive-create copy, which fails the same way.
-    """
-    try:
-        os.link(temporary, target)
-    except FileExistsError:
-        raise
-    except OSError:
-        # Exclusive-create copy. If the copy fails halfway (disk full, target
-        # removed), the incomplete destination this call created is removed:
-        # a partial report must never sit at the target looking complete.
-        destination_handle = open(target, "xb")  # noqa: SIM115 - closed explicitly below (identity needed)
-        try:
-            with open(temporary, "rb") as source:
-                shutil.copyfileobj(source, destination_handle)
-        except BaseException:
-            # Decide while OUR handle is still open: compare the path's current
-            # file against the file this handle refers to. If the path was
-            # replaced during copying, it names a different file (possibly even
-            # reusing the inode, hence the change-time comparison) and must
-            # never be deleted by this cleanup.
-            try:
-                created_stats: os.stat_result | None = os.fstat(destination_handle.fileno())
-            except (OSError, ValueError):
-                created_stats = None
-            # Compared BEFORE closing: closing flushes buffered data, which can
-            # update the change time and make our own file look like a stranger.
-            try:
-                current = os.lstat(target)
-            except OSError:
-                current = None
-            same_file = (
-                created_stats is not None and current is not None and _is_same_export_file(current, created_stats)
-            )
-            destination_handle.close()
-            if created_stats is not None:
-                if same_file:
-                    try:
-                        target.unlink()
-                    except OSError as cleanup_exc:
-                        raise OSError(
-                            errno.EIO,
-                            f"Incomplete export could not be removed; delete '{target}' manually",
-                        ) from cleanup_exc
-                elif current is not None:
-                    raise OSError(
-                        errno.EIO,
-                        f"Incomplete export at '{target}' was replaced during copying and left in place",
-                    ) from None
-            raise
-        destination_handle.close()
-    temporary.unlink()
-
-
-def _write_csv(export: Export, path: Path) -> None:
-    with open(path, "w", encoding=UTF8_BOM, newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(export.columns), extrasaction="ignore", quoting=csv.QUOTE_ALL)
-        writer.writeheader()
-        writer.writerows({column: _csv_cell(row.get(column, "")) for column in export.columns} for row in export.rows)
+def _write_csv(export: Export, stream: IO[str]) -> None:
+    writer = csv.DictWriter(stream, fieldnames=list(export.columns), extrasaction="ignore", quoting=csv.QUOTE_ALL)
+    writer.writeheader()
+    writer.writerows({column: _csv_cell(row.get(column, "")) for column in export.columns} for row in export.rows)
 
 
 #: Characters a spreadsheet treats as the start of a formula in the first cell position.
@@ -348,14 +325,15 @@ def _csv_cell(value: Any) -> Any:
     return value
 
 
-def _write_json(export: Export, path: Path) -> None:
+def _write_json(export: Export, stream: IO[str]) -> None:
     document = {
         "kind": export.kind,
         "generated_at": _timestamp(datetime.now().timestamp()),
         "summary": export.summary,
         "rows": list(export.rows),
     }
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    json.dump(document, stream, indent=2, ensure_ascii=False)
+    stream.write("\n")
 
 
 def _timestamp(value: float | None) -> str:

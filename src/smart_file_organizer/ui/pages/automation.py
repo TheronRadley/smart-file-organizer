@@ -6,12 +6,12 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from smart_file_organizer.core.models import ScanOptions
 from smart_file_organizer.core.watcher import (
     WATCHER_PAUSED,
     WATCHER_RUNNING,
     WATCHER_STOPPING,
     FolderWatcher,
+    PendingPreview,
     WatchConfig,
 )
 from smart_file_organizer.ui import theme
@@ -21,13 +21,10 @@ from smart_file_organizer.ui.components.tasks import TaskContext
 from smart_file_organizer.ui.components.widgets import Card, Column, FileTable
 from smart_file_organizer.ui.pages.base import BasePage, button, muted_label
 from smart_file_organizer.utils.formatting import format_size
+from smart_file_organizer.utils.paths import protected_root_reason
 
 APPLY_PENDING_KEY = "watch-apply"
 REFRESH_MS = 1000
-# Stopping must not freeze the window: the status flips to Stopped on its own
-# once the current check has finished, and the page refreshes every second.
-UI_STOP_TIMEOUT = 0.5
-STABLE_SECONDS = 10.0
 
 
 class AutomationPage(BasePage):
@@ -47,8 +44,7 @@ class AutomationPage(BasePage):
         muted_label(
             how,
             "• The folder is re-checked every few seconds (no background service, no OS hooks).\n"
-            "• A file is only handled after its size and timestamp stop changing for 10 seconds, so partial copies "
-            "are left alone.\n"
+            "• Files must look unchanged for 10 seconds. A paused download or copy can also look stable.\n"
             "• Organized folders and excluded names are never processed again. Each file is handled once unless "
             "it changes.\n"
             "• To disable monitoring: press Stop, or remove the folder. Closing the application also stops monitoring.",
@@ -117,6 +113,8 @@ class AutomationPage(BasePage):
         self._log.pack(fill="x", padx=12, pady=(0, 12))
         self._log.configure(state="disabled")
         self._timer: str | None = None
+        self._removing: set[str] = set()
+        self._shown_pending: tuple[tuple[FolderWatcher, PendingPreview], ...] = ()
 
     # ----- lifecycle -----------------------------------------------------
 
@@ -133,24 +131,33 @@ class AutomationPage(BasePage):
 
     def _tick(self) -> None:
         self._timer = None
+        if self.app.is_closing:
+            return
         self.refresh()
         self._timer = self.after(REFRESH_MS, self._tick)
 
     def refresh(self) -> None:
+        watches = self.ctx.watches.watchers()
+        snapshots = {watcher: watcher.pending_preview() for watcher in watches}
+        selected = self._folders.selected_payload()
         self._folders.clear()
         for folder in self.ctx.settings.watch_folders:
             watcher = self.ctx.watches.get(Path(folder))
             status = _describe_status(watcher.status if watcher else "stopped")
-            pending = str(len(watcher.pending)) if watcher else "0"
-            last = watcher.events[-1].text.split("  ", 1)[-1] if watcher and watcher.events else "-"
+            pending = str(len(snapshots[watcher].moves)) if watcher else "0"
+            events = watcher.events if watcher else []
+            last = events[-1].message if events else "-"
             if watcher and watcher.last_error:
                 last = watcher.last_error
-            self._folders.insert([folder, status, pending, last], folder)
+            iid = self._folders.insert([folder, status, pending, last], folder)
+            if folder == selected:
+                self._folders.select_rows([iid])
 
         self._pending.clear()
-        for watcher in self.ctx.watches.watchers():
-            for item in watcher.pending:
-                self._pending.insert([item.source.name, str(item.destination or "-"), format_size(item.size)], item)
+        for preview in snapshots.values():
+            for item in preview.moves:
+                self._pending.insert([str(item.source), str(item.destination or "-"), format_size(item.size)], item)
+        self._shown_pending = tuple((watcher, preview) for watcher, preview in snapshots.items() if preview.moves)
 
         lines: list[str] = []
         for watcher in self.ctx.watches.watchers():
@@ -173,11 +180,14 @@ class AutomationPage(BasePage):
         if path.is_symlink():
             dialogs.error(self, "Symbolic link", "Choose the real folder rather than a link to it.")
             return
+        if reason := protected_root_reason(path):
+            dialogs.error(self, "Protected folder", f"This is {reason}. Choose another folder to monitor.")
+            return
         if str(path) in self.ctx.settings.watch_folders:
             dialogs.info(self, "Already monitored", "That folder is already in the list.")
             return
         self.ctx.settings.watch_folders.append(str(path))
-        self.ctx.save_settings()
+        self._save_settings()
         self.refresh()
 
     def _remove_folder(self) -> None:
@@ -185,48 +195,33 @@ class AutomationPage(BasePage):
         if folder is None:
             dialogs.info(self, "Select a folder", "Select a folder in the list first.")
             return
-        if not self.ctx.watches.remove(Path(folder), UI_STOP_TIMEOUT):
-            # Still stopping: keep the folder listed and monitored until the
-            # worker has actually exited, rather than orphaning the watcher.
-            dialogs.info(
-                self,
-                "Still stopping",
-                "That folder is still finishing its current check. It will remain listed until monitoring "
-                "has fully stopped; try removing it again in a moment.",
-            )
-            self.refresh()
+        if folder not in self._removing:
+            self._removing.add(folder)
+            self._finish_remove(folder)
+
+    def _finish_remove(self, folder: str) -> None:
+        if self.app.is_closing:
             return
+        if not self.ctx.watches.remove(Path(folder), timeout=0.0):
+            self.notify("Removing the folder after its current work finishes…")
+            self.after(REFRESH_MS, lambda: self._finish_remove(folder))
+            return
+        self._removing.discard(folder)
         self.ctx.settings.watch_folders = [f for f in self.ctx.settings.watch_folders if f != folder]
-        self.ctx.save_settings()
+        self._save_settings()
         self.refresh()
+
+    def _save_settings(self) -> None:
+        try:
+            self.ctx.save_settings()
+        except OSError as exc:
+            dialogs.error(self, "Could not save settings", f"The change applies for this session only.\n\n{exc}")
 
     # ----- options -------------------------------------------------------
 
     def _save_options(self) -> None:
         self.ctx.settings.watch_recursive = bool(self._recursive.get())
-        self.ctx.save_settings()
-        self._apply_live_config()
-
-    def _apply_live_config(self) -> None:
-        """Push current automation settings into already-created watchers."""
-        settings = self.ctx.settings
-        if not self.ctx.watches.watchers():
-            return
-        config = WatchConfig(
-            organize_by=settings.organize_by,
-            collision_strategy=settings.collision_strategy,
-            recursive=bool(self._recursive.get()),
-            auto_apply=bool(self._auto.get()),
-            scan_options=ScanOptions(
-                recursive=bool(self._recursive.get()),
-                excluded_folders=tuple(settings.excluded_folders),
-                excluded_patterns=tuple(settings.excluded_patterns),
-            ),
-            disabled_categories=frozenset(settings.disabled_categories),
-            interval_seconds=float(settings.watch_interval_seconds),
-            stable_seconds=STABLE_SECONDS,
-        )
-        self.ctx.watches.update_config(config)
+        self._save_settings()
 
     def _toggle_auto(self) -> None:
         if self._auto.get():
@@ -234,55 +229,35 @@ class AutomationPage(BasePage):
                 self,
                 "Enable automatic organization",
                 "Automatic mode moves stable files into organized folders without asking you first.\n\n"
-                "Collision rules, exclusions and the disabled-category list still apply, and every move is recorded "
-                "so it can be undone. Enable automatic organization?",
+                "Collision rules, exclusions and the disabled-category list still apply. "
+                "See History for undo and recovery. Enable automatic organization?",
             )
             if not confirmed:
                 self._auto.deselect()
                 return
         self.ctx.settings.watch_auto_apply = bool(self._auto.get())
-        self.ctx.save_settings()
-        self._apply_live_config()
+        self._save_settings()
 
     # ----- controls ------------------------------------------------------
 
     def _start(self) -> None:
+        if self.app.is_closing:
+            return
         folders = self.ctx.settings.watch_folders
         if not folders:
             dialogs.info(self, "No folders", "Add at least one folder to monitor first.")
             return
-        settings = self.ctx.settings
-        config = WatchConfig(
-            organize_by=settings.organize_by,
-            collision_strategy=settings.collision_strategy,
-            recursive=bool(self._recursive.get()),
-            auto_apply=bool(self._auto.get()),
-            scan_options=ScanOptions(
-                recursive=bool(self._recursive.get()),
-                excluded_folders=tuple(settings.excluded_folders),
-                excluded_patterns=tuple(settings.excluded_patterns),
-            ),
-            disabled_categories=frozenset(settings.disabled_categories),
-            interval_seconds=float(settings.watch_interval_seconds),
-            stable_seconds=STABLE_SECONDS,
-        )
+        config = WatchConfig.from_settings(self.ctx.settings)
         started = 0
         for folder in folders:
+            if folder in self._removing:
+                continue
             path = Path(folder)
             existing = self.ctx.watches.get(path)
-            if existing is not None:
-                # A stopped (fully exited) watcher must restart when Start is
-                # pressed again; previously it was skipped forever. A watcher
-                # still stopping is left alone so two threads never run.
-                if existing.status == "stopped" and not existing.is_thread_alive:
-                    existing.config = config
-                    existing.start()
-                    started += 1
-                continue
-            watcher = FolderWatcher(path, config, classifier=self.ctx.classifier, history=self.ctx.history)
-            self.ctx.watches.add(watcher)
-            watcher.start()
-            started += 1
+            if existing is None:
+                existing = FolderWatcher(path, config, classifier=self.ctx.classifier, history=self.ctx.history)
+                self.ctx.watches.add(existing)
+            started += int(existing.start())
         self.notify(
             f"Monitoring {len(self.ctx.watches)} folder(s)." if started else "Already monitoring the listed folders."
         )
@@ -299,42 +274,45 @@ class AutomationPage(BasePage):
         self.refresh()
 
     def _stop(self) -> None:
-        for watcher in self.ctx.watches.watchers():
-            watcher.stop(UI_STOP_TIMEOUT)
-        stopping = any(watcher.status == WATCHER_STOPPING for watcher in self.ctx.watches.watchers())
-        self.notify(
-            "Finishing the current check; no further files will be moved." if stopping else "Monitoring stopped."
-        )
+        self.ctx.watches.request_stop_all()
+        self.runner.cancel(APPLY_PENDING_KEY)
+        stopping = not self.ctx.watches.all_stopped() or self.runner.is_busy(APPLY_PENDING_KEY)
+        self.notify("Stopping after current work finishes…" if stopping else "Monitoring stopped.")
         self.refresh()
 
     def _apply_pending(self) -> None:
-        watchers = [w for w in self.ctx.watches.watchers() if w.pending]
-        if not watchers:
+        if self.app.is_closing or self.runner.is_busy(APPLY_PENDING_KEY):
+            return
+        approvals = self._shown_pending
+        if not approvals:
             dialogs.info(self, "Nothing waiting", "No files are waiting for approval.")
             return
-        total = sum(len(w.pending) for w in watchers)
+        total = sum(len(preview.moves) for _, preview in approvals)
         if not dialogs.confirm(
             self, "Apply waiting files", f"Move {total} waiting file(s) into their organized folders?"
         ):
             return
 
-        def work(task: TaskContext) -> tuple[int, int, int]:
-            moved = skipped = failed = 0
-            for watcher in watchers:
-                outcome = watcher.apply_pending(task.cancel_event)
+        def work(task: TaskContext) -> tuple[int, int, bool]:
+            moved = failed = 0
+            needs_recovery = False
+            for watcher, preview in approvals:
+                if task.cancelled:
+                    break
+                outcome = watcher.apply_pending(preview, cancel_event=task.cancel_event)
                 if outcome is not None:
                     moved += outcome.success_count
-                    skipped += outcome.skipped_count
                     failed += outcome.failed_count
-            return moved, skipped, failed
+                    needs_recovery |= outcome.needs_recovery
+            return moved, failed, needs_recovery
 
-        def success(counts: tuple[int, int, int]) -> None:
-            moved, skipped, failed = counts
-            if failed or skipped:
-                self.notify(f"Waiting files processed: {moved} moved, {skipped} skipped, {failed} failed.")
-            else:
-                self.notify(f"Moved {moved} waiting file(s).")
-            self.refresh()
+        def success(result: tuple[int, int, bool]) -> None:
+            moved, failed, needs_recovery = result
+            summary = f"Waiting files: {moved} moved, {total - moved - failed} skipped, {failed} failed."
+            if needs_recovery:
+                summary += " Check Recovery guidance in History."
+            self.notify(summary)
+            self.app.refresh_views()
 
         self.runner.submit(
             APPLY_PENDING_KEY, work, on_success=success, on_error=lambda m: dialogs.error(self, "Could not apply", m)

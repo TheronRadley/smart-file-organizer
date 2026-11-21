@@ -15,6 +15,7 @@ htmlcov/
 build/
 dist/
 *.spec.bak
+/SmartFileOrganizer.spec
 *.manifest
 *.exe
 *.msi

@@ -20,7 +20,7 @@ from smart_file_organizer.core import fileops
 from smart_file_organizer.core.classifier import Classifier
 from smart_file_organizer.core.fileops import move_no_overwrite
 from smart_file_organizer.core.history import HistoryRepository
-from smart_file_organizer.core.models import ScanOptions
+from smart_file_organizer.core.models import OP_MOVE, ScanOptions
 from smart_file_organizer.core.organizer import build_plan, execute_plan
 from smart_file_organizer.core.scanner import ScanError, scan_folder
 from smart_file_organizer.utils.paths import protected_root_reason, unique_path
@@ -60,12 +60,12 @@ def test_competing_process_creating_the_destination_never_gets_overwritten(
     # Another process takes the planned destination after the preview.
     rival = make_file(workspace / "Documents" / "report.pdf", b"rival - do not replace")
 
-    outcome = execute_plan(plan, history=history)  # default strategy: rename
+    outcome = execute_plan(plan, history=history)
 
     assert rival.read_bytes() == b"rival - do not replace", "the competing file must be untouched"
-    assert outcome.success_count == 1
-    assert (workspace / "Documents" / "report (2).pdf").read_bytes() == b"incoming"
-    assert not source.exists()
+    assert outcome.skipped_count == 1
+    assert not (workspace / "Documents" / "report (2).pdf").exists()
+    assert source.read_bytes() == b"incoming"
 
 
 def test_cross_volume_failure_leaves_the_source_untouched(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,11 +76,9 @@ def test_cross_volume_failure_leaves_the_source_untouched(workspace: Path, monke
     def fail_cross_volume(*args: object, **kwargs: object) -> None:
         raise OSError(errno.EXDEV, "Invalid cross-device link")
 
-    monkeypatch.setattr(fileops.os, "link", fail_cross_volume)
-    if os.name == "nt":  # the Windows fallback rename would also fail across volumes
-        monkeypatch.setattr(fileops.os, "rename", fail_cross_volume)
+    monkeypatch.setattr(fileops, "_rename_no_replace", fail_cross_volume)
 
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="cross-device"):
         move_no_overwrite(source, destination)
 
     assert source.read_bytes() == b"payload", "the source is never deleted before a verified destination exists"
@@ -148,8 +146,6 @@ def test_destination_folder_swapped_during_journaling_is_refused(
 ) -> None:
     if not symlinks_supported(tmp_path):
         pytest.skip("Symbolic links are not permitted in this environment")
-    from smart_file_organizer.core.models import OP_MOVE
-
     outside = tmp_path / "outside-swap"
     outside.mkdir()
     source = make_file(workspace / "report.pdf", b"payload")
@@ -217,3 +213,93 @@ def test_database_failure_after_a_successful_move_keeps_it_discoverable(
     operations = history.list_operations(outcome.batch_id)
     moves = [op for op in operations if op.destination_path and op.destination_path.endswith("report.pdf")]
     assert moves and moves[0].status == STATUS_PENDING, "the unrecorded move stays pending for restart recovery"
+    assert outcome.needs_recovery
+    assert history.get_batch(outcome.batch_id).needs_recovery
+    history.recover_interrupted()
+    assert history.get_batch(outcome.batch_id).status == "interrupted"
+
+
+def test_profile_tree_is_excluded_from_scan_and_stale_plan(
+    workspace: Path, classifier: Classifier, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = make_file(workspace / "profile" / "settings.json", b"{}").resolve()
+    wal = make_file(settings.parent / "history.sqlite3-wal", b"synthetic WAL")
+    options = ScanOptions(recursive=True)
+    stale = build_plan(scan_folder(workspace, options, classifier), classifier)
+    assert len(stale.ready) == 2
+
+    monkeypatch.setenv("SFO_DATA_DIR", str(settings.parent))
+    with pytest.raises(ScanError, match="application data folder"):
+        scan_folder(settings.parent, options)
+    assert scan_folder(workspace, options).entries == []
+    outcome = execute_plan(stale, history=history)
+    assert outcome.skipped_count == 2
+    assert settings.read_bytes() == b"{}" and wal.read_bytes() == b"synthetic WAL"
+    assert not (workspace / "Code").exists() and not (workspace / "Other").exists()
+
+
+def test_destination_category_cannot_be_the_app_profile(
+    workspace: Path, classifier: Classifier, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_file(workspace / "report.pdf")
+    plan = build_plan(scan_folder(workspace, ScanOptions(), classifier), classifier)
+    monkeypatch.setenv("SFO_DATA_DIR", str(workspace / "Documents"))
+    outcome = execute_plan(plan, history=history)
+    assert outcome.skipped_count == 1 and "data folder" in outcome.outcomes[0].reason
+    assert source.exists() and not (workspace / "Documents").exists()
+
+
+def test_in_place_edit_during_move_journaling_is_refused(
+    workspace: Path, classifier: Classifier, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_file(workspace / "report.pdf")
+    plan = build_plan(scan_folder(workspace, ScanOptions(), classifier), classifier)
+    record = history.record_operation
+
+    def journal_then_edit(batch_id, operation_type, **kwargs):
+        operation_id = record(batch_id, operation_type, **kwargs)
+        if operation_type == OP_MOVE:
+            source.write_bytes(b"ordinary editor saved this in place")
+        return operation_id
+
+    monkeypatch.setattr(history, "record_operation", journal_then_edit)
+    outcome = execute_plan(plan, history=history)
+    assert outcome.skipped_count == 1 and "changed after approval" in outcome.outcomes[0].reason
+    assert source.read_bytes() == b"ordinary editor saved this in place"
+    assert not (workspace / "Documents" / source.name).exists()
+
+
+def test_plain_destination_folder_replaced_while_journaling_is_refused(
+    workspace: Path, classifier: Classifier, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_file(workspace / "report.pdf")
+    plan = build_plan(scan_folder(workspace, ScanOptions(), classifier), classifier)
+    category = workspace / "Documents"
+    journal = history.record_operation
+
+    def journal_then_replace(batch_id, operation_type, **kwargs):
+        operation_id = journal(batch_id, operation_type, **kwargs)
+        if operation_type == OP_MOVE:
+            category.rename(workspace / "prior-category")
+            category.mkdir()
+        return operation_id
+
+    monkeypatch.setattr(history, "record_operation", journal_then_replace)
+    outcome = execute_plan(plan, history=history)
+    assert outcome.skipped_count == 1 and "destination folder changed" in outcome.outcomes[0].reason
+    assert source.exists() and not (category / source.name).exists()
+
+
+def test_case_alias_to_profile_is_also_protected_on_case_insensitive_volumes(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = workspace / "Profile"
+    private.mkdir()
+    alias = workspace / "PROFILE"
+    if not alias.is_dir():
+        pytest.skip("This volume distinguishes alternate case spellings")
+    make_file(private / "settings.json", b"{}")
+    monkeypatch.setenv("SFO_DATA_DIR", str(alias))
+    with pytest.raises(ScanError, match="application data folder"):
+        scan_folder(private, ScanOptions())
+    assert not scan_folder(workspace, ScanOptions(recursive=True)).entries

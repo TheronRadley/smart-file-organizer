@@ -259,3 +259,60 @@ def test_undo_honours_cancellation_before_restoring(
     result = undo_batch(outcome.batch_id, history, cancel_event=cancel)
     assert result.restored == 0
     assert (workspace / "Documents" / "a.pdf").exists()
+
+
+def test_undo_keeps_a_replacement_category_folder(workspace: Path, options, classifier, history) -> None:
+    source = make_file(workspace / "report.pdf", b"payload")
+    plan = build_plan(scan_folder(workspace, options, classifier), classifier)
+    result = execute_plan(plan, history=history)
+    category = workspace / "Documents"
+    old = category.rename(workspace / "Old Documents")
+    category.mkdir()
+    (old / source.name).rename(category / source.name)
+
+    undo = undo_batch(result.batch_id, history)
+    assert undo.restored == 1 and undo.kept_folders == 1
+    assert source.read_bytes() == b"payload"
+    assert category.is_dir(), "Undo did not create the replacement directory"
+
+
+def test_in_place_edit_while_undo_is_journaled_is_refused(
+    workspace: Path, options, classifier, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.core.models import UNDO_PENDING
+
+    source = make_file(workspace / "report.pdf", b"payload")
+    plan = build_plan(scan_folder(workspace, options, classifier), classifier)
+    result = execute_plan(plan, history=history)
+    destination = workspace / "Documents" / source.name
+    original_set = history.set_undo_result
+
+    def journal_then_edit(operation_id, status, error=None):
+        original_set(operation_id, status, error)
+        if status == UNDO_PENDING:
+            destination.write_bytes(b"edited in place")
+
+    monkeypatch.setattr(history, "set_undo_result", journal_then_edit)
+    undo = undo_batch(result.batch_id, history)
+    assert undo.failed == 1
+    assert not source.exists()
+    assert destination.read_bytes() == b"edited in place"
+
+
+def test_undo_keeps_unrecorded_forward_move_visible(workspace: Path, options, classifier, history) -> None:
+    from smart_file_organizer.core.models import OP_MOVE, STATUS_PENDING
+    from smart_file_organizer.core.recovery import unfinished_batches
+
+    recorded = make_file(workspace / "recorded.pdf", b"restore this")
+    unresolved = make_file(workspace / "unrecorded.pdf", b"leave this in place")
+    result = execute_plan(build_plan(scan_folder(workspace, options, classifier), classifier), history=history)
+    assert result.success_count == 2
+    for row in history.list_operations(result.batch_id):
+        if row.op_type == OP_MOVE and row.source_path == str(unresolved):
+            history.update_operation(row.id, STATUS_PENDING)
+    undo = undo_batch(result.batch_id, history)
+    assert undo.restored == 1 and undo.needs_recovery and not undo.fully_reversed
+    assert recorded.read_bytes() == b"restore this" and not unresolved.exists()
+    assert (workspace / "Documents" / unresolved.name).read_bytes() == b"leave this in place"
+    (batch,) = unfinished_batches(history)
+    assert batch.id == result.batch_id and batch.status == "undo_partial"

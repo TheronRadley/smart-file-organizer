@@ -11,8 +11,8 @@ Workflow:
    with :func:`~smart_file_organizer.core.fileops.move_no_overwrite`.
 
 Each file is moved individually. The filesystem cannot provide a multi-file
-transaction, so a batch can end partially applied; every outcome is recorded
-and the batch status reports ``partial`` in that case.
+transaction, so a batch can end partially applied; outcomes are recorded
+or left pending for recovery if its outcome could not be written.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import os
 import stat
-import threading
 from collections.abc import Callable, Collection, Iterable
 from datetime import datetime
 from pathlib import Path
@@ -34,8 +33,16 @@ from smart_file_organizer.config import (
     ORGANIZE_BY_TYPE,
     ORGANIZE_MODES,
 )
+from smart_file_organizer.core.boundary import (
+    BoundaryError,
+    bound_directory,
+    directory_identity,
+    is_reparse_entry,
+    writable_parts,
+)
+from smart_file_organizer.core.cancellation import Cancellation
 from smart_file_organizer.core.classifier import Classifier
-from smart_file_organizer.core.fileops import MoveRollbackError, SourceChangedError, move_no_overwrite
+from smart_file_organizer.core.fileops import MoveCancelled, SourceChangedError, move_no_overwrite
 from smart_file_organizer.core.history import HistoryRepository
 from smart_file_organizer.core.models import (
     BATCH_ORGANIZE,
@@ -58,8 +65,8 @@ from smart_file_organizer.core.operation_guard import operation_lock
 from smart_file_organizer.core.scanner import describe_os_error, file_identity
 from smart_file_organizer.utils.paths import (
     is_link_like,
-    is_within,
     sanitize_name,
+    validate_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +76,9 @@ DATE_FOLDER_FORMAT = "%Y-%m"
 NO_EXTENSION_FOLDER = "No Extension"
 MAX_COLLISION_NUMBER = 10_000
 CANCELLED_REASON = "Cancelled before this file was processed"
+BUSY_REASON = "Another file operation is already running for this folder; nothing was moved"
+DESTINATION_RACE_REASON = "Destination was created by another program during the batch; skipped"
+DESTINATION_CHANGED_REASON = "The approved destination is occupied; rebuild the preview before moving this file"
 
 
 def destination_folder_for(entry: FileEntry, organize_by: str, classifier: Classifier) -> str:
@@ -115,7 +125,7 @@ def build_plan(
                 collision_strategy=collision_strategy,
                 protected=protected,
                 reserved=reserved,
-                skip_categories=disabled if organize_by == ORGANIZE_BY_TYPE else set(),
+                skip_categories=disabled,
                 blocked_folders=blocked_folders,
                 next_suffix=next_suffix,
             )
@@ -125,6 +135,7 @@ def build_plan(
         organize_by=organize_by,
         collision_strategy=collision_strategy,
         operations=tuple(operations),
+        root_identity=scan.root_identity,
     )
 
 
@@ -228,15 +239,16 @@ def check_source(operation: PlannedOperation, root: Path) -> str | None:
 
     Read-only; used both for dry runs and immediately before each real move.
     """
-    if not is_within(operation.source, root):
-        return "Source is outside the selected folder"
     try:
+        writable_parts(operation.source, root)
         stats = os.lstat(operation.source)
+    except BoundaryError as exc:
+        return str(exc.strerror)
     except FileNotFoundError:
         return "Source no longer exists"
     except OSError as exc:
         return f"Source cannot be read: {describe_os_error(exc)}"
-    if not _is_regular(stats.st_mode):
+    if not stat.S_ISREG(stats.st_mode) or is_reparse_entry(stats):
         return "Source is not a regular file (link or special file)"
     if stats.st_size != operation.size or stats.st_mtime_ns != operation.modified_ns:
         return "Source changed after the preview was built; rescan before organizing"
@@ -245,24 +257,22 @@ def check_source(operation: PlannedOperation, root: Path) -> str | None:
     return None
 
 
-def _is_regular(mode: int) -> bool:
-    return stat.S_ISREG(mode)
-
-
 def execute_plan(
     plan: OrganizePlan,
     *,
     history: HistoryRepository | None,
     selected: Iterable[int] | None = None,
     dry_run: bool = False,
-    cancel_event: threading.Event | None = None,
+    cancel_event: Cancellation | None = None,
     progress: ProgressCallback | None = None,
     kind: str = BATCH_ORGANIZE,
+    exact_destinations: bool = True,
 ) -> BatchOutcome:
     """Apply (or dry-run) the selected operations of ``plan``.
 
     ``selected`` holds operation indices; None means every operation. Dry runs
-    perform the same validation but never create folders, move files or write history.
+    validate the preview but never create folders, move files or write history.
+    Disable ``exact_destinations`` only for unattended, explicitly opted-in moves.
     """
     if not dry_run and history is None:
         raise ValueError("A history repository is required when changes are applied")
@@ -271,7 +281,14 @@ def execute_plan(
 
     if dry_run:
         return _execute_plan(
-            plan, operations, history=history, dry_run=True, cancel_event=cancel_event, progress=progress, kind=kind
+            plan,
+            operations,
+            history=history,
+            dry_run=True,
+            cancel_event=cancel_event,
+            progress=progress,
+            kind=kind,
+            exact_destinations=exact_destinations,
         )
 
     with operation_lock(plan.root) as acquired:
@@ -279,7 +296,6 @@ def execute_plan(
             # Another organize/undo/watch operation is moving files in this
             # folder right now. Acting on this preview could mean acting on a
             # half-moved tree, so every selected operation is refused.
-            reason = "Another file operation is already running for this folder; nothing was moved"
             outcome = BatchOutcome(root=plan.root, dry_run=False, batch_id=None)
             outcome.outcomes.extend(
                 OperationOutcome(
@@ -287,14 +303,21 @@ def execute_plan(
                     str(op.source),
                     str(op.destination) if op.destination else None,
                     STATUS_SKIPPED,
-                    reason,
+                    BUSY_REASON,
                     op.size,
                 )
                 for op in operations
             )
             return outcome
         return _execute_plan(
-            plan, operations, history=history, dry_run=False, cancel_event=cancel_event, progress=progress, kind=kind
+            plan,
+            operations,
+            history=history,
+            dry_run=False,
+            cancel_event=cancel_event,
+            progress=progress,
+            kind=kind,
+            exact_destinations=exact_destinations,
         )
 
 
@@ -304,13 +327,14 @@ def _execute_plan(
     *,
     history: HistoryRepository | None,
     dry_run: bool,
-    cancel_event: threading.Event | None,
+    cancel_event: Cancellation | None,
     progress: ProgressCallback | None,
     kind: str,
+    exact_destinations: bool,
 ) -> BatchOutcome:
     batch_id: str | None = None
     if not dry_run and operations and history is not None:
-        batch_id = history.create_batch(kind, plan.root)
+        batch_id = history.create_batch(kind, plan.root, root_identity=plan.root_identity)
     outcome = BatchOutcome(root=plan.root, dry_run=dry_run, batch_id=batch_id)
 
     total = len(operations)
@@ -320,7 +344,10 @@ def _execute_plan(
             for remaining in operations[position - 1 :]:
                 outcome.outcomes.append(_record_skip(remaining, CANCELLED_REASON, history, batch_id))
             break
-        outcome.outcomes.append(_apply_operation(operation, plan, dry_run, history, batch_id))
+        result = _apply_operation(operation, plan, dry_run, history, batch_id, exact_destinations, cancel_event)
+        outcome.outcomes.append(result)
+        if result.reason == CANCELLED_REASON:
+            outcome.cancelled = True
         if progress is not None:
             progress(position, total)
 
@@ -328,15 +355,13 @@ def _execute_plan(
         try:
             history.finish_batch(batch_id, _batch_status(outcome), _summary(outcome))
         except Exception:
-            # The moves already happened; losing the batch-finalize write must
-            # not erase the per-operation outcomes the caller is about to show.
-            # Operations still marked pending are reconciled as interrupted on
-            # the next start, so every completed move stays discoverable.
             logger.exception("Could not finalize batch %s in history; outcomes are still reported", batch_id)
     return outcome
 
 
 def _batch_status(outcome: BatchOutcome) -> str:
+    if outcome.needs_recovery:
+        return "interrupted"
     if outcome.cancelled:
         return "cancelled"
     if outcome.failed_count:
@@ -345,7 +370,8 @@ def _batch_status(outcome: BatchOutcome) -> str:
 
 
 def _summary(outcome: BatchOutcome) -> str:
-    return f"{outcome.success_count} moved, {outcome.skipped_count} skipped, {outcome.failed_count} failed"
+    summary = f"{outcome.success_count} moved, {outcome.skipped_count} skipped, {outcome.failed_count} failed"
+    return f"{summary}. Check Recovery guidance." if outcome.needs_recovery else summary
 
 
 def _record_skip(
@@ -376,26 +402,34 @@ def _apply_operation(
     dry_run: bool,
     history: HistoryRepository | None,
     batch_id: str | None,
+    exact_destinations: bool,
+    cancel_event: Cancellation | None,
 ) -> OperationOutcome:
     if operation.status != STATUS_READY or operation.destination is None:
         return _record_skip(operation, operation.reason or "Not eligible", history, batch_id)
 
-    refusal = check_source(operation, plan.root)
-    if refusal is not None:
+    if refusal := check_source(operation, plan.root):
         return _record_skip(operation, refusal, history, batch_id)
-
-    destination_dir = plan.root / operation.destination_folder
-    refusal = _check_destination_folder(destination_dir, plan.root)
-    if refusal is not None:
-        return _record_skip(operation, refusal, history, batch_id)
-
     target = operation.destination
-    if os.path.lexists(target):
-        if plan.collision_strategy == COLLISION_SKIP:
-            return _record_skip(operation, "Destination appeared after the preview; skipped", history, batch_id)
-        target = _next_free_name(target)
-    if not is_within(target, plan.root):
-        return _record_skip(operation, "Destination resolves outside the selected folder", history, batch_id)
+    destination_dir = plan.root / operation.destination_folder
+    if not operation.destination_folder or target.parent != destination_dir or not target.name:
+        return _record_skip(operation, "Destination does not match the preview's folder", history, batch_id)
+    try:
+        if len(destination_dir.relative_to(plan.root).parts) != 1:
+            raise BoundaryError("Destination must be directly in the selected folder", destination_dir)
+        validate_name(destination_dir.name)
+        root_id = directory_identity(plan.root)
+        if plan.root_identity is not None and root_id != plan.root_identity:
+            raise BoundaryError("The selected folder changed; choose it and scan again", plan.root)
+        destination_id = directory_identity(destination_dir) if os.path.lexists(destination_dir) else None
+        writable_parts(target, plan.root)
+        if os.path.lexists(target):
+            if exact_destinations or plan.collision_strategy == COLLISION_SKIP:
+                return _record_skip(operation, DESTINATION_CHANGED_REASON, history, batch_id)
+            target = _next_free_name(target)
+    except (OSError, ValueError) as exc:
+        reason = describe_os_error(exc) if isinstance(exc, OSError) else str(exc)
+        return _record_skip(operation, reason, history, batch_id)
 
     if dry_run:
         return OperationOutcome(
@@ -403,29 +437,33 @@ def _apply_operation(
         )
 
     assert history is not None and batch_id is not None
-    if not destination_dir.exists():
-        try:
-            os.mkdir(destination_dir)
-        except FileExistsError:
-            pass  # created concurrently; re-validated below
-        except OSError as exc:
-            return _record_skip(operation, f"Could not create folder: {describe_os_error(exc)}", history, batch_id)
-        else:
-            history.record_operation(
-                batch_id,
-                OP_CREATE_FOLDER,
-                source=None,
-                destination=str(destination_dir),
-                status=STATUS_SUCCESS,
-            )
-    if not destination_dir.is_dir() or is_link_like(destination_dir):
-        return _record_skip(operation, "Destination folder is no longer a plain folder", history, batch_id)
-
-    # Final re-validation: creating the destination folder can take arbitrarily
-    # long, so the source is checked again immediately before it is moved.
-    refusal = check_source(operation, plan.root)
-    if refusal is not None:
-        return _record_skip(operation, refusal, history, batch_id)
+    if cancel_event is not None and cancel_event.is_set():
+        return _record_skip(operation, CANCELLED_REASON, history, batch_id)
+    try:
+        if destination_id is None:
+            with bound_directory(plan.root, plan.root, root_identity=root_id) as parent:
+                parent.recheck()
+                try:
+                    parent.mkdir(destination_dir.name)
+                except FileExistsError:
+                    created_here = False
+                else:
+                    created_here = True
+                with bound_directory(destination_dir, plan.root, root_identity=root_id) as directory:
+                    destination_id = directory.identity
+                if created_here:
+                    history.record_operation(
+                        batch_id,
+                        OP_CREATE_FOLDER,
+                        source=None,
+                        destination=str(destination_dir),
+                        file_id=destination_id,
+                        status=STATUS_SUCCESS,
+                    )
+        with bound_directory(operation.source.parent, plan.root, root_identity=root_id) as source_parent:
+            source_parent_id = source_parent.identity
+    except OSError as exc:
+        return _record_skip(operation, f"Could not verify folders: {describe_os_error(exc)}", history, batch_id)
 
     operation_id = history.record_operation(
         batch_id,
@@ -438,73 +476,56 @@ def _apply_operation(
         status=STATUS_PENDING,
     )
 
-    # Last-moment containment re-check: the destination folder could have been
-    # swapped for a symlink/junction after every earlier check (including while
-    # the operation above was being journaled). If containment can no longer
-    # be guaranteed, fail closed and do not call the move at all.
-    refusal = _check_destination_folder(destination_dir, plan.root)
-    if refusal is None and not is_within(target, plan.root):
-        refusal = "Destination resolves outside the selected folder"
-    if refusal is not None:
-        history.update_operation(operation_id, STATUS_SKIPPED, error=refusal)
-        return OperationOutcome(
-            operation.index, str(operation.source), str(target), STATUS_SKIPPED, refusal, operation.size
-        )
-
     try:
-        move_no_overwrite(operation.source, target, expected_identity=operation.file_id)
-    except SourceChangedError as exc:
-        # The path was swapped between the check and the move: report, do not follow it.
-        reason = str(exc.strerror)
-        history.update_operation(operation_id, STATUS_SKIPPED, error=reason)
-        return OperationOutcome(
-            operation.index, str(operation.source), str(target), STATUS_SKIPPED, reason, operation.size
+        if cancel_event is not None and cancel_event.is_set():
+            return _write_move_result(history, operation_id, operation, target, STATUS_SKIPPED, CANCELLED_REASON)
+        move_no_overwrite(
+            operation.source,
+            target,
+            expected_identity=operation.file_id,
+            expected_size=operation.size,
+            expected_modified_ns=operation.modified_ns,
+            root=plan.root,
+            root_identity=root_id,
+            source_parent_identity=source_parent_id,
+            destination_parent_identity=destination_id,
+            cancel_event=cancel_event,
         )
+    except MoveCancelled:
+        return _write_move_result(history, operation_id, operation, target, STATUS_SKIPPED, CANCELLED_REASON)
+    except (BoundaryError, SourceChangedError) as exc:
+        return _write_move_result(history, operation_id, operation, target, STATUS_SKIPPED, describe_os_error(exc))
     except FileExistsError:
-        reason = "Destination was created by another program during the batch; skipped"
-        history.update_operation(operation_id, STATUS_SKIPPED, error=reason)
-        return OperationOutcome(
-            operation.index, str(operation.source), str(target), STATUS_SKIPPED, reason, operation.size
-        )
+        return _write_move_result(history, operation_id, operation, target, STATUS_SKIPPED, DESTINATION_RACE_REASON)
     except OSError as exc:
-        reason = f"Move failed: {describe_os_error(exc)}"
-        if isinstance(exc, MoveRollbackError):
-            # Nothing was lost, but an extra copy was kept: say so, and how to resolve it.
-            reason = f"{reason}. {exc.recovery}"
-        history.update_operation(operation_id, STATUS_FAILED, error=reason)
         logger.warning("Move of %s failed: %s", operation.source.name, exc)
-        return OperationOutcome(
-            operation.index, str(operation.source), str(target), STATUS_FAILED, reason, operation.size
-        )
+        return _write_move_result(history, operation_id, operation, target, STATUS_FAILED, describe_os_error(exc))
+    return _write_move_result(history, operation_id, operation, target, STATUS_SUCCESS)
 
+
+def _write_move_result(
+    history: HistoryRepository,
+    operation_id: int,
+    operation: PlannedOperation,
+    target: Path,
+    status: str,
+    reason: str = "",
+) -> OperationOutcome:
     try:
-        history.update_operation(operation_id, STATUS_SUCCESS, destination=str(target))
+        history.update_operation(operation_id, status, destination=str(target), error=reason or None)
     except Exception:
-        # The file is already moved. The operation stays 'pending' in history,
-        # so on the next start it is marked interrupted and Recovery guidance
-        # will locate the file at its destination: the completed move remains
-        # discoverable instead of vanishing with the failed write.
-        logger.exception(
-            "Move of %s succeeded but recording it failed; it will surface as interrupted on restart",
-            operation.source.name,
-        )
+        logger.exception("Could not record the move outcome for %s", operation.source.name)
+        warning = "Could not record this outcome; check Recovery guidance in History"
         return OperationOutcome(
             operation.index,
             str(operation.source),
             str(target),
-            STATUS_SUCCESS,
-            "Moved, but recording the result in history failed; restart the app and check Recovery guidance",
+            status,
+            f"{reason}. {warning}" if reason else warning,
             operation.size,
+            history_recorded=False,
         )
-    return OperationOutcome(operation.index, str(operation.source), str(target), STATUS_SUCCESS, "", operation.size)
-
-
-def _check_destination_folder(destination_dir: Path, root: Path) -> str | None:
-    if os.path.lexists(destination_dir) and (is_link_like(destination_dir) or not destination_dir.is_dir()):
-        return "Destination folder is blocked by a file or link"
-    if not is_within(destination_dir, root):
-        return "Destination folder resolves outside the selected folder"
-    return None
+    return OperationOutcome(operation.index, str(operation.source), str(target), status, reason, operation.size)
 
 
 def _next_free_name(target: Path) -> Path:

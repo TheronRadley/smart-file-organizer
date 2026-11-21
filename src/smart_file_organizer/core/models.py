@@ -88,6 +88,7 @@ class ScanResult:
     skipped_other: int
     issues: list[ScanIssue]
     cancelled: bool = False
+    root_identity: str | None = None
 
     @property
     def file_count(self) -> int:
@@ -137,6 +138,7 @@ class OrganizePlan:
     organize_by: str
     collision_strategy: str
     operations: tuple[PlannedOperation, ...]
+    root_identity: str | None = None
 
     @property
     def ready(self) -> tuple[PlannedOperation, ...]:
@@ -159,6 +161,7 @@ class OperationOutcome:
     status: str
     reason: str
     size: int
+    history_recorded: bool = True
 
 
 @dataclass
@@ -170,6 +173,10 @@ class BatchOutcome:
     batch_id: str | None
     outcomes: list[OperationOutcome] = field(default_factory=list)
     cancelled: bool = False
+
+    @property
+    def needs_recovery(self) -> bool:
+        return any(not item.history_recorded for item in self.outcomes)
 
     def count(self, status: str) -> int:
         return sum(1 for outcome in self.outcomes if outcome.status == status)
@@ -199,6 +206,8 @@ class BatchRecord:
     finished_at: float | None
     note: str | None
     operation_count: int = 0
+    root_identity: str | None = None
+    needs_recovery: bool = False
 
 
 @dataclass(frozen=True)

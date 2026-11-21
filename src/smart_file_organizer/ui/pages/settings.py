@@ -51,7 +51,8 @@ def _split_list(text: str) -> list[str]:
 class SettingsPage(BasePage):
     title = "Settings"
     description = (
-        "Preferences are saved to settings.json in your user data folder. Changes apply to new scans and previews."
+        "Preferences are saved to settings.json in your user data folder. Changed watcher rules take effect "
+        "without restarting monitoring and clear prior approvals."
     )
 
     def build(self, body: ctk.CTkFrame) -> None:
@@ -191,11 +192,11 @@ class SettingsPage(BasePage):
             self._banner.show(str(exc), color=theme.DANGER)
             return
         self.ctx.settings = updated
-        self.ctx.save_settings()
+        saved = self._persist_settings()
         theme.configure_appearance(updated.theme)
-        self._banner.hide()
         self.app.refresh_views()
-        self.notify("Settings saved.")
+        if saved:
+            self.notify("Settings saved.")
 
     def _collect(self) -> Settings:
         folders: dict[str, str] = {}
@@ -249,11 +250,21 @@ class SettingsPage(BasePage):
             return
         defaults = Settings(watch_folders=list(self.ctx.settings.watch_folders))
         self.ctx.settings = defaults
-        self.ctx.save_settings()
+        saved = self._persist_settings()
         theme.configure_appearance(defaults.theme)
         self._load()
         self.app.refresh_views()
-        self.notify("Defaults restored.")
+        if saved:
+            self.notify("Defaults restored.")
+
+    def _persist_settings(self) -> bool:
+        try:
+            self.ctx.save_settings()
+        except OSError as exc:
+            self._banner.show(f"Settings apply for this session only: {exc}", color=theme.WARNING)
+            return False
+        self._banner.hide()
+        return True
 
     def _open_data_folder(self) -> None:
         try:

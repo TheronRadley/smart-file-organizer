@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import Any, TypeVar
 
 from smart_file_organizer.core.scanner import ScanError
@@ -59,41 +60,43 @@ def user_message(exc: BaseException) -> str:
 class TaskRunner:
     """Runs one background task per key and marshals callbacks back to the UI thread."""
 
-    def __init__(self, widget: Any) -> None:
+    def __init__(self, widget: Any, *, worker_cleanup: Callable[[], None] | None = None) -> None:
         self._widget = widget
         self._inbox: queue.Queue[Callable[[], None]] = queue.Queue()
         self._busy: dict[str, threading.Event] = {}
-        self._threads: dict[str, threading.Thread] = {}
+        self._threads: set[threading.Thread] = set()
         self._polling = False
+        self._closing = False
+        self._worker_cleanup = worker_cleanup
 
     def is_busy(self, key: str) -> bool:
         return key in self._busy
 
     def any_busy(self) -> bool:
-        return bool(self._busy)
+        return bool(self._busy) or self.workers_active()
 
     def cancel(self, key: str) -> None:
         event = self._busy.get(key)
         if event is not None:
             event.set()
 
-    def shutdown(self, timeout: float = 10.0) -> bool:
-        """Cancel every running task and wait (bounded) for workers to finish.
-
-        Returns True only when no worker thread is still alive. The caller
-        must not release shared resources (such as the history database) while
-        this returns False: a worker that is mid-move finishes its current
-        filesystem operation, observes cancellation, and then exits.
-        """
-        for event in list(self._busy.values()):
+    def request_shutdown(self) -> None:
+        """Cancel all tasks without blocking Tk and reject new work."""
+        self._closing = True
+        for event in self._busy.values():
             event.set()
+
+    def workers_active(self) -> bool:
+        self._threads = {thread for thread in self._threads if thread.is_alive()}
+        return bool(self._threads)
+
+    def shutdown(self, timeout: float = 10.0) -> bool:
+        """Signal all tasks, then wait up to a shared deadline. Not for Tk callbacks."""
+        self.request_shutdown()
         deadline = time.monotonic() + timeout
-        for thread in list(self._threads.values()):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            thread.join(remaining)
-        return not any(thread.is_alive() for thread in list(self._threads.values()))
+        for thread in self._threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        return not self.workers_active()
 
     def submit(
         self,
@@ -105,8 +108,9 @@ class TaskRunner:
         on_progress: Callable[[str], None] | None = None,
     ) -> bool:
         """Start ``work`` in the background. Returns False if a task with ``key`` is already running."""
-        if key in self._busy:
+        if self._closing or key in self._busy:
             return False
+        self.workers_active()  # Reap exited threads on the UI thread only.
         cancel_event = threading.Event()
         self._busy[key] = cancel_event
         progress = (lambda message: self._post(lambda: on_progress(message))) if on_progress else (lambda _m: None)
@@ -118,14 +122,19 @@ class TaskRunner:
             except Exception as exc:  # Logged with traceback; the user sees only a friendly message.
                 logger.exception("Background task %s failed", key)
                 message = user_message(exc)
-                self._post(lambda: self._finish(key, lambda: on_error(message)))
+                action = partial(on_error, message)
             else:
-                self._post(lambda: self._finish(key, lambda: on_success(result)))
+                action = partial(on_success, result)
             finally:
-                self._threads.pop(key, None)
+                if self._worker_cleanup is not None:
+                    try:
+                        self._worker_cleanup()
+                    except Exception:
+                        logger.exception("Could not release background resources for %s", key)
+            self._post(lambda: self._finish(key, action))
 
         thread = threading.Thread(target=run, name=f"task-{key}", daemon=True)
-        self._threads[key] = thread
+        self._threads.add(thread)
         thread.start()
         self._ensure_polling()
         return True
@@ -143,15 +152,18 @@ class TaskRunner:
             self._widget.after(POLL_INTERVAL_MS, self._drain)
 
     def _drain(self) -> None:
+        if self._closing:
+            self._polling = False
+            return
         try:
-            while True:
+            while not self._closing:
                 try:
                     action = self._inbox.get_nowait()
                 except queue.Empty:
                     break
                 action()
         finally:
-            if self._busy or not self._inbox.empty():
+            if not self._closing and (self._busy or not self._inbox.empty()):
                 self._widget.after(POLL_INTERVAL_MS, self._drain)
             else:
                 self._polling = False

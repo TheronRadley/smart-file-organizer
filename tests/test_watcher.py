@@ -144,7 +144,7 @@ def test_apply_pending_only_moves_approved_unchanged_files(
     watcher.poll_once()
     clock.now += 11
     watcher.poll_once()
-    outcome = watcher.apply_pending()
+    outcome = watcher.apply_pending(watcher.pending_preview())
     assert outcome is not None and outcome.success_count == 1
     assert (workspace / "Documents" / "one.pdf").exists()
 
@@ -276,12 +276,11 @@ def test_files_not_reached_before_a_stop_are_still_organized_later(
     make_file(workspace / "a.pdf", mtime=int(clock.now))
     make_file(workspace / "b.pdf", mtime=int(clock.now))
     real_execute = watcher_module.execute_plan
+    cancel = threading.Event()
 
     def execute_then_cancel(plan, **kwargs):
-        cancel = kwargs.get("cancel_event")
-
         def progress(position: int, total: int) -> None:
-            if position == 1 and cancel is not None:
+            if position == 1:
                 cancel.set()  # user pressed Stop after the first file
 
         kwargs["progress"] = progress
@@ -290,7 +289,6 @@ def test_files_not_reached_before_a_stop_are_still_organized_later(
     monkeypatch.setattr(watcher_module, "execute_plan", execute_then_cancel)
     watcher.poll_once()  # first sighting: the files are not stable yet
     clock.now += 11
-    cancel = threading.Event()
     outcomes = watcher.poll_once(cancel)
     assert outcomes[0].cancelled
     assert outcomes[0].success_count == 1
@@ -314,20 +312,24 @@ def test_stopped_watcher_poll_does_nothing(workspace: Path, options: ScanOptions
     assert (workspace / "a.pdf").exists()
 
 
-def test_manager_passes_the_stop_timeout_on(
+def test_manager_signals_every_watcher_before_waiting(
     workspace: Path, options: ScanOptions, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The interface stops with a short timeout so a slow folder cannot freeze it."""
     manager = WatchManager()
-    watcher = _watcher(workspace, False, options, history, FakeClock(0))
-    manager.add(watcher)
-    seen: list[float] = []
-    monkeypatch.setattr(watcher, "stop", lambda timeout=10.0: seen.append(timeout))
+    slow = _watcher(workspace / "slow", False, options, history, FakeClock(0))
+    other = _watcher(workspace / "other", False, options, history, FakeClock(0))
+    manager.add(slow)
+    manager.add(other)
+    seen = []
 
-    manager.stop_all(timeout=0.25)
-    manager.remove(workspace, timeout=0.5)
+    def wait(timeout: float) -> bool:
+        assert other.pending_preview().run.is_set() and slow.pending_preview().run.is_set()
+        seen.append(timeout)
+        return True
 
-    assert seen == [0.25, 0.5]
+    monkeypatch.setattr(slow, "wait_stopped", wait)
+    assert manager.stop_all(timeout=0.25)
+    assert len(seen) == 1 and 0 <= seen[0] <= 0.25
 
 
 def test_apply_pending_refuses_a_destination_the_user_never_saw(
@@ -345,13 +347,14 @@ def test_apply_pending_refuses_a_destination_the_user_never_saw(
     # pick "one (2).pdf", which the user never approved.
     make_file(workspace / "Documents" / "one.pdf", b"someone else")
 
-    assert watcher.apply_pending() is None
+    assert watcher.apply_pending(watcher.pending_preview()) is None
     assert (workspace / "one.pdf").exists(), "the file must not move to an unapproved destination"
     assert not (workspace / "Documents" / "one (2).pdf").exists()
     assert history.list_batches() == []
-    # The new destination is shown for renewed approval, and only then applied.
+    # The next poll shows the new destination for renewed approval.
+    watcher.poll_once()
     assert [p.destination.name for p in watcher.pending] == ["one (2).pdf"]
-    outcome = watcher.apply_pending()
+    outcome = watcher.apply_pending(watcher.pending_preview())
     assert outcome is not None and outcome.success_count == 1
     assert (workspace / "Documents" / "one (2).pdf").exists()
 
@@ -373,11 +376,15 @@ def test_apply_pending_refuses_a_same_size_same_timestamp_replacement(
     replacement = make_file(workspace / "replacement.bin", b"BBBB", mtime=int(clock.now) - 11)
     os.replace(replacement, original)
 
-    assert watcher.apply_pending() is None
+    assert watcher.apply_pending(watcher.pending_preview()) is None
     assert (workspace / "one.pdf").read_bytes() == b"BBBB", "the unapproved replacement must not be moved"
     assert not (workspace / "Documents" / "one.pdf").exists()
     assert history.list_batches() == []
-    # It is offered again as a new pending file, requiring fresh approval.
+    assert not watcher.pending
+    watcher.poll_once()
+    assert not watcher.pending, "the replacement must settle before it is offered"
+    clock.now += 11
+    watcher.poll_once()
     assert len(watcher.pending) == 1
 
 
@@ -428,7 +435,7 @@ def test_apply_pending_honours_a_cancelled_task(
     assert len(watcher.pending) == 1
     cancel = threading.Event()
     cancel.set()
-    assert watcher.apply_pending(cancel) is None
+    assert watcher.apply_pending(watcher.pending_preview(), cancel_event=cancel) is None
     assert (workspace / "one.pdf").exists()
     assert history.list_batches() == []
 
@@ -439,3 +446,237 @@ def test_stop_all_reports_whether_every_watcher_exited(
     manager = WatchManager()
     manager.add(_watcher(workspace, False, options, history, FakeClock(0)))
     assert manager.stop_all(timeout=1.0) is True
+
+
+def test_approval_uses_the_displayed_snapshot_not_a_later_poll(
+    workspace: Path, options: ScanOptions, history: HistoryRepository
+) -> None:
+    clock = FakeClock(1_700_000_011)
+    watcher = _watcher(workspace, False, options, history, clock)
+    make_file(workspace / "displayed.pdf")
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    shown = watcher.pending_preview()
+    assert [item.source.name for item in shown.moves] == ["displayed.pdf"]
+
+    later = make_file(workspace / "later.pdf")
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    assert len(watcher.pending) == 2
+    outcome = watcher.apply_pending(shown)
+    assert outcome is not None and outcome.success_count == 1
+    assert (workspace / "Documents" / "displayed.pdf").exists()
+    assert later.exists()
+    assert [item.source for item in watcher.pending] == [later]
+
+
+def test_approved_move_is_skipped_if_destination_changes_after_replanning(
+    workspace: Path, options: ScanOptions, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.core import watcher as watcher_module
+
+    clock = FakeClock(1_700_000_011)
+    watcher = _watcher(workspace, False, options, history, clock)
+    source = make_file(workspace / "report.pdf")
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    approved = watcher.pending_preview()
+    target = workspace / "Documents" / "report.pdf"
+    execute = watcher_module.execute_plan
+
+    def occupy_then_execute(plan, **kwargs):
+        make_file(target, b"keep this")
+        return execute(plan, **kwargs)
+
+    monkeypatch.setattr(watcher_module, "execute_plan", occupy_then_execute)
+    outcome = watcher.apply_pending(approved)
+    assert outcome is not None and outcome.skipped_count == 1
+    assert source.exists() and target.read_bytes() == b"keep this"
+    assert not target.with_name("report (2).pdf").exists()
+
+
+def test_live_settings_update_classification_and_invalidate_approvals(
+    workspace: Path, history: HistoryRepository
+) -> None:
+    from smart_file_organizer.config import Settings
+
+    clock = FakeClock(1_700_000_011)
+    manager = WatchManager()
+    settings = Settings(extension_overrides={"csv": "Documents"})
+    watcher = FolderWatcher(
+        workspace,
+        WatchConfig.from_settings(settings),
+        classifier=Classifier.from_settings(settings),
+        history=history,
+        clock=clock,
+    )
+    manager.add(watcher)
+    source = make_file(workspace / "report.csv")
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    approved = watcher.pending_preview()
+    assert approved.moves[0].destination == workspace / "Documents" / source.name
+
+    manager.update_settings(Settings(excluded_patterns=["*.csv"]))
+    assert not watcher.pending
+    assert watcher.apply_pending(approved) is None
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    assert not watcher.pending and source.exists()
+
+
+def test_resetting_auto_apply_cancels_a_poll_using_old_rules(
+    workspace: Path, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.config import Settings
+    from smart_file_organizer.core import watcher as watcher_module
+
+    clock = FakeClock(1_700_000_011)
+    manager = WatchManager()
+    watcher = _watcher(workspace, True, ScanOptions(), history, clock)
+    manager.add(watcher)
+    source = make_file(workspace / "report.pdf")
+    watcher.poll_once()
+    clock.now += 11
+    scan_folder = watcher_module.scan_folder
+
+    def scan_then_reset(*args, **kwargs):
+        scan = scan_folder(*args, **kwargs)
+        manager.update_settings(Settings())
+        return scan
+
+    monkeypatch.setattr(watcher_module, "scan_folder", scan_then_reset)
+    assert watcher.poll_once() == []
+    assert source.exists() and history.list_batches() == []
+
+
+def test_stop_signals_two_live_watchers_without_waiting_for_the_slow_one(
+    workspace: Path, options: ScanOptions, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.core import watcher as watcher_module
+
+    slow = _watcher(workspace / "slow", False, options, history, FakeClock(0))
+    fast = _watcher(workspace / "fast", False, options, history, FakeClock(0))
+    manager = WatchManager()
+    entered = threading.Event()
+    release = threading.Event()
+    for watcher in (slow, fast):
+        watcher.folder.mkdir()
+        manager.add(watcher)
+    scan = watcher_module.scan_folder
+
+    def block_first(folder, *args, **kwargs):
+        if folder == slow.folder:
+            entered.set()
+            release.wait(10)
+        return scan(folder, *args, **kwargs)
+
+    monkeypatch.setattr(watcher_module, "scan_folder", block_first)
+    try:
+        slow.start()
+        fast.start()
+        assert entered.wait(5)
+        manager.request_stop_all()
+        assert not manager.all_stopped()
+        assert _wait_until(lambda: not fast.has_active_work)
+        assert slow.status == WATCHER_STOPPING
+    finally:
+        release.set()
+        assert manager.stop_all(timeout=5)
+
+
+def test_remove_cancels_and_keeps_an_inflight_manual_approval(
+    workspace: Path, options: ScanOptions, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smart_file_organizer.core import watcher as watcher_module
+
+    clock = FakeClock(1_700_000_011)
+    watcher = _watcher(workspace, False, options, history, clock)
+    manager = WatchManager()
+    manager.add(watcher)
+    source = make_file(workspace / "report.pdf")
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    approved = watcher.pending_preview()
+    assert approved.moves
+
+    entered = threading.Event()
+    release = threading.Event()
+    scan = watcher_module.scan_folder
+    result = []
+
+    def blocked_scan(*args, **kwargs):
+        entered.set()
+        release.wait(10)
+        return scan(*args, **kwargs)
+
+    monkeypatch.setattr(watcher_module, "scan_folder", blocked_scan)
+    task = threading.Thread(target=lambda: result.append(watcher.apply_pending(approved)), daemon=True)
+    task.start()
+    try:
+        assert entered.wait(5)
+        assert manager.remove(workspace, timeout=0) is False
+        assert not manager.all_stopped()
+        assert manager.get(workspace) is watcher
+        assert watcher.status == WATCHER_STOPPING and not watcher.start()
+    finally:
+        release.set()
+        task.join(5)
+    assert not task.is_alive() and result == [None]
+    assert manager.remove(workspace, timeout=0) is True
+    assert source.exists() and not history.list_batches()
+
+
+def test_poll_worker_connection_is_released_at_stop(workspace: Path, options: ScanOptions, history, database) -> None:
+    ready = threading.Event()
+    watcher = _watcher(workspace, False, options, history, FakeClock(0))
+    main_connection = database.connection()
+
+    def poll(_cancel):
+        history.list_batches()
+        ready.set()
+        return []
+
+    watcher.poll_once = poll
+    for _ in range(4):
+        ready.clear()
+        assert watcher.start()
+        try:
+            assert ready.wait(5)
+            assert len(database._connections) == 2
+        finally:
+            watcher.stop(timeout=5)
+        assert not watcher.has_active_work
+        assert database._connections == {main_connection}
+
+
+def test_non_rule_setting_changes_preserve_an_approval(workspace: Path, history: HistoryRepository) -> None:
+    from smart_file_organizer.config import Settings
+
+    clock = FakeClock(1_700_000_011)
+    manager = WatchManager()
+    settings = Settings()
+    watcher = FolderWatcher(
+        workspace,
+        WatchConfig.from_settings(settings),
+        classifier=Classifier.from_settings(settings),
+        history=history,
+        clock=clock,
+    )
+    manager.add(watcher)
+    make_file(workspace / "report.pdf")
+    watcher.poll_once()
+    clock.now += 11
+    watcher.poll_once()
+    shown = watcher.pending_preview()
+    assert shown.moves
+    manager.update_settings(Settings(theme="light"))
+    assert watcher.pending_preview() == shown
+    outcome = watcher.apply_pending(shown)
+    assert outcome is not None and outcome.success_count == 1

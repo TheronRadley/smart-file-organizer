@@ -16,10 +16,12 @@ from smart_file_organizer.core.models import (
     STATUS_SKIPPED,
     STATUS_SUCCESS,
     UNDO_DONE,
+    UNDO_PENDING,
     BatchRecord,
     OperationRecord,
     ScanRecord,
 )
+from smart_file_organizer.core.operation_guard import history_clear_lock
 from smart_file_organizer.database.db import Database
 
 
@@ -31,13 +33,13 @@ class HistoryRepository:
 
     # ----- batches -------------------------------------------------------
 
-    def create_batch(self, kind: str, root: Path, *, dry_run: bool = False) -> str:
+    def create_batch(self, kind: str, root: Path, *, dry_run: bool = False, root_identity: str | None = None) -> str:
         batch_id = uuid.uuid4().hex
         with self._db.transaction() as connection:
             connection.execute(
-                "INSERT INTO batches (id, kind, root_name, root_path, dry_run, status, created_at)"
-                " VALUES (?, ?, ?, ?, ?, 'running', ?)",
-                (batch_id, kind, root.name or str(root), str(root), int(dry_run), time.time()),
+                "INSERT INTO batches (id, kind, root_name, root_path, dry_run, status, created_at, root_identity)"
+                " VALUES (?, ?, ?, ?, ?, 'running', ?, ?)",
+                (batch_id, kind, root.name or str(root), str(root), int(dry_run), time.time(), root_identity),
             )
         return batch_id
 
@@ -61,6 +63,15 @@ class HistoryRepository:
             rows = self._db.query(_BATCH_SELECT + " ORDER BY b.created_at DESC")
         else:
             rows = self._db.query(_BATCH_SELECT + " ORDER BY b.created_at DESC LIMIT ?", (limit,))
+        return [_batch_from_row(row) for row in rows]
+
+    def list_recovery_batches(self, limit: int | None = None) -> list[BatchRecord]:
+        query = (
+            f"{_BATCH_SELECT} WHERE {_NEEDS_RECOVERY}"
+            " OR status IN ('running', 'interrupted', 'partial', 'cancelled', 'undo_partial')"
+            " ORDER BY b.created_at DESC"
+        )
+        rows = self._db.query(query) if limit is None else self._db.query(f"{query} LIMIT ?", (limit,))
         return [_batch_from_row(row) for row in rows]
 
     # ----- operations ----------------------------------------------------
@@ -91,18 +102,22 @@ class HistoryRepository:
         self, operation_id: int, status: str, *, destination: str | None = None, error: str | None = None
     ) -> None:
         with self._db.transaction() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE operations SET status = ?, error = ?, destination_path = COALESCE(?, destination_path)"
                 " WHERE id = ?",
                 (status, error, destination, operation_id),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError("The move's history record is missing")
 
     def set_undo_result(self, operation_id: int, undo_status: str, error: str | None = None) -> None:
         with self._db.transaction() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE operations SET undo_status = ?, undo_error = ?, undone_at = ? WHERE id = ?",
                 (undo_status, error, time.time(), operation_id),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError("The undo's history record is missing")
 
     def list_operations(self, batch_id: str) -> list[OperationRecord]:
         rows = self._db.query(
@@ -114,18 +129,25 @@ class HistoryRepository:
     def recover_interrupted(self) -> int:
         """Mark work left pending by a crash as interrupted; return how many rows changed."""
         with self._db.transaction() as connection:
-            cursor = connection.execute(
-                "UPDATE operations SET status = ?, error = 'Application stopped before this operation finished;"
-                " check the file locations manually.' WHERE status = ?",
-                (STATUS_INTERRUPTED, STATUS_PENDING),
-            )
-            changed = cursor.rowcount
             connection.execute(
                 "UPDATE batches SET status = 'interrupted', finished_at = ?,"
-                " note = 'Interrupted before completion' WHERE status = 'running'",
-                (time.time(),),
+                " note = 'One or more operations need recovery guidance' WHERE status = 'running'"
+                " OR (status NOT IN ('interrupted', 'undo_partial') AND id IN"
+                " (SELECT batch_id FROM operations WHERE status IN (?, ?)))",
+                (time.time(), STATUS_PENDING, STATUS_INTERRUPTED),
             )
-        return changed
+            connection.execute(
+                "UPDATE batches SET status = 'undo_partial', finished_at = ?,"
+                " note = 'One or more restores need recovery guidance'"
+                " WHERE status <> 'undo_partial' AND id IN (SELECT batch_id FROM operations WHERE undo_status = ?)",
+                (time.time(), UNDO_PENDING),
+            )
+            cursor = connection.execute(
+                "UPDATE operations SET status = ?, error = 'The outcome was not recorded;"
+                " verify the file locations in Recovery guidance.' WHERE status = ?",
+                (STATUS_INTERRUPTED, STATUS_PENDING),
+            )
+            return cursor.rowcount
 
     def set_batch_status(self, batch_id: str, status: str, note: str | None = None) -> None:
         self.finish_batch(batch_id, status, note)
@@ -201,20 +223,23 @@ class HistoryRepository:
         Refused while any file operation is active: clearing a pending move's
         record would let it finish with no history and no way to undo it.
         """
-        from smart_file_organizer.core.operation_guard import any_operation_active
-
-        if any_operation_active():
-            raise RuntimeError(
-                "History cannot be cleared while a file operation is running. Wait for it to finish, then try again."
-            )
-        with self._db.transaction() as connection:
+        with history_clear_lock(), self._db.transaction() as connection:
             connection.execute("DELETE FROM operations")
             connection.execute("DELETE FROM batches")
             connection.execute("DELETE FROM scans")
 
+    def close_thread_connection(self) -> None:
+        """Release history resources owned by the calling worker."""
+        self._db.close_thread_connection()
 
+
+_NEEDS_RECOVERY = (
+    "EXISTS (SELECT 1 FROM operations o WHERE o.batch_id = b.id AND o.op_type = 'move'"
+    " AND (o.status IN ('pending', 'interrupted', 'failed') OR o.undo_status IN ('undoing', 'failed')))"
+)
 _BATCH_SELECT = (
-    "SELECT b.*, (SELECT COUNT(*) FROM operations o WHERE o.batch_id = b.id) AS operation_count FROM batches b"
+    "SELECT b.*, (SELECT COUNT(*) FROM operations o WHERE o.batch_id = b.id) AS operation_count,"
+    f" {_NEEDS_RECOVERY} AS needs_recovery FROM batches b"
 )
 
 
@@ -230,6 +255,8 @@ def _batch_from_row(row: sqlite3.Row) -> BatchRecord:
         finished_at=row["finished_at"],
         note=row["note"],
         operation_count=row["operation_count"],
+        root_identity=row["root_identity"],
+        needs_recovery=bool(row["needs_recovery"]),
     )
 
 

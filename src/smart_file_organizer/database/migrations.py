@@ -57,6 +57,13 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX idx_scans_created ON scans(created_at)",
         ),
     ),
+    (
+        2,
+        (
+            "ALTER TABLE batches ADD COLUMN root_identity TEXT",
+            "CREATE INDEX idx_operations_undo_status ON operations(undo_status)",
+        ),
+    ),
 )
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

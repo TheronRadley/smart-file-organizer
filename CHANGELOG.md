@@ -6,6 +6,23 @@ aims to follow [Semantic Versioning](https://semver.org/) once it has its first 
 
 ## [Unreleased]
 
+### File safety and desktop build
+
+- Organization and Undo now use atomic no-replace renames. Unsupported volumes fail closed;
+  the move no longer creates a second hard link or deletes it in a rollback.
+- The app revalidates approved file metadata and directory identity at mutation time, excludes
+  its data folder, and only removes verified empty directories during Undo.
+- Manual and watcher approvals bind to the displayed rows and destination names. Running watchers
+  use current exclusions and classification; restoring defaults disables unattended moves.
+- Exports ask explicitly before replacing a specific existing file. New targets remain no-clobber.
+- One writer owns each data folder, and Clear history excludes moves. Recovery guidance shows
+  unresolved journal entries and distinguishes verified, missing, and unverified paths.
+- Stop and Close signal all watchers without blocking the UI; worker database connections are
+  closed at teardown. Windows CI and local scripts smoke-test the actual packaged executable.
+
+The older audit notes below describe the previous implementation and are superseded where they
+refer to link-based moves, save-dialog overwrite behavior, or startup and shutdown coordination.
+
 ### Safety (audit on 080e9db)
 - **Destination vanishing or changing mid-move can no longer lose files.** If the destination
   cannot be verified after linking, the move aborts with the source left in place; if the
