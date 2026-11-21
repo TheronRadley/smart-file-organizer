@@ -69,6 +69,9 @@ def schedule_smoke(app: App) -> int:
         finally:
             app.on_close()
 
+    # CustomTkinter can pump events while setting up the Windows title bar
+    # before mainloop() starts. Realize the window before queuing work that closes it.
+    app.update()
     app.after(0, work)
     app.mainloop()
     return exit_code
