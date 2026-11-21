@@ -23,9 +23,10 @@ def configure_logging(log_path: Path, *, level: int = logging.INFO) -> None:
         log_path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
     )
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-    console = logging.StreamHandler(sys.stderr)
-    console.setLevel(logging.WARNING)
-    console.setFormatter(logging.Formatter(LOG_FORMAT))
     root.addHandler(file_handler)
-    root.addHandler(console)
+    if sys.stderr is not None:  # The windowed Windows executable has no console.
+        console = logging.StreamHandler(sys.stderr)
+        console.setLevel(logging.WARNING)
+        console.setFormatter(logging.Formatter(LOG_FORMAT))
+        root.addHandler(console)
     root._sfo_configured = True  # type: ignore[attr-defined]  # guards against duplicate handlers

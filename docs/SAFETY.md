@@ -1,161 +1,95 @@
 # Safety
 
-Smart File Organizer moves real files, so every design decision favours not losing or
-overwriting data over convenience. This document states what the application guarantees,
-what it does not, and what to do when something goes wrong.
+Smart File Organizer moves real files. Start with a small test folder, review the preview, and
+keep backups of files you cannot replace. Undo reverses moves; it is not a backup.
 
-## Guarantees
+## What the app does
 
-1. **Nothing moves without your approval.** Organization always shows a preview. The only
-   path that moves files unattended is automatic organization in Automation, which must be
-   switched on explicitly, after a confirmation dialog.
-2. **Dry runs change nothing.** A dry run performs the same validation as a real run,
-   creates no folders, moves no files and writes no history.
-3. **Existing files are not overwritten by any move this app performs.** Each move is created as a new hard link and
-   only then is the original removed. Creating a link fails atomically if the destination
-   exists. When hard links are unavailable, Windows uses its non-replacing rename primitive,
-   while POSIX fails closed and leaves the source untouched rather than risking an overwrite
-   (see *Limitations*).
-4. **A failed move does not delete a file it did not create** (within the identity limits below). If the original cannot be
-   removed after the link was created, the extra link is removed again - but only after it
-   has been proved, by device and inode, to still be the link this operation created *and*
-   to still refer to the same file object as the source. If another program replaced that
-   path in the meantime, or the filesystem reports no file identifier, the copy is kept and
-   the failure reports both paths. An extra link is recoverable; a file another program just
-   wrote is not.
-5. **Collisions are resolved by a rule you choose.** The default renames the incoming file to
-   `name (2).ext`, `name (3).ext`, and so on. The alternative skips the file and reports it.
-6. **Sources are re-checked immediately before each move.** The file must still exist, be a
-   regular file (not a link), have the same size and modification time, and carry the same
-   file identity as when the preview was built. Otherwise it is skipped and reported. The
-   check runs again after the destination folder has been created, and the move itself
-   refuses a source that is no longer a regular file or no longer carries the recorded
-   identity, so a path swapped between check and use cannot be followed.
-7. **Destinations stay inside the selected folder.** Destination folders are plain names
-   validated against Windows reserved names and invalid characters. Path containment is
-   checked after resolving links.
-8. **Symbolic links and junctions are never followed.** They are counted and skipped during
-   scans, so the tool cannot be led outside the folder you selected.
-9. **Organized folders are not re-sorted.** Files already inside a destination folder are
-   not moved again, so recursive scans do not churn your sorted tree.
-10. **Every outcome is recorded.** Each move, skip and failure is written to the history
-   database with its reason, and each batch has a final status (`completed`, `partial`,
-   `cancelled`, or `interrupted` after a crash).
-11. **Undo is guarded.** A batch is reversed only when every outstanding move can be reversed
-    safely. The checks are:
-    - the organized file still exists, is a regular file, and has the recorded size,
-      modification time and file identity;
-    - the original location is free;
-    - the original folder is still a real folder inside the batch folder.
+- **Preview and approval.** Manual organization and **Apply waiting files** in Automation move
+  only the approved files to the approved destinations. The app does not substitute a later
+  watcher list. If a file changed or a destination became occupied, rebuild or review a fresh
+  preview. The collision rule is used when making the preview, not to silently choose a new name
+  during a manual apply. Automatic organization is the explicit opt-in exception to previewing.
+- **Dry runs.** A dry run checks a preview without creating folders, moving files, or writing
+  history. It cannot prove that the filesystem will permit the actual rename later.
+- **One atomic, no-replace move per file.** The app uses the platform's non-replacing rename
+  (Windows, Linux, and macOS where supported). If the filesystem doesn't support it, the app
+  refuses the move. It does not copy/delete across volumes or fall back to linking and unlinking
+  the source, so there is no move rollback that deletes a second name.
+- **Source and destination checks.** Immediately before a move or restore, the app checks the
+  source's file type, identity (when available), size, and modification time. It checks that both
+  paths stay in the approved tree, refuses link-like directories, and checks the root's recorded
+  identity for new batches. POSIX moves address the entries through open directory descriptors.
+- **Protected locations.** Filesystem roots and known OS folders such as `C:\Windows` and `/usr`
+  aren't valid scan roots. The active app data directory (`SFO_DATA_DIR` or the default) is also
+  refused as a root, excluded from recursive scans, and protected again at apply and undo time.
+  Scans skip detected symlinks, junctions and other link-like entries rather than descending into
+  them. Hidden and temporary names are excluded by default; those name rules are configurable.
+- **History and guarded undo.** Before moving a file, the app records the intended source and
+  destination. Undo checks all recorded outstanding moves before starting. Original locations
+  must be free, and moved files must still match their recorded metadata. Undo only removes an
+  empty folder if it can verify that this batch created that directory. Old history may lack
+  directory identities; those folders are left in place.
+- **Export consent.** A new report is published without overwriting a file that appears at the
+  chosen name, using the same native no-replace rename. To replace an existing file, confirm
+  that file; it is checked again before publication. Report paths inside the active profile
+  are refused. Duplicates and large-file searches never delete files.
+- **One writer per data folder.** A second instance using an in-use data folder exits without
+  opening its history. Within the app, overlapping file operations cannot run together, and
+  **Clear history** is excluded for the entire time a move or undo batch is active (and vice versa).
+- **Local and unprivileged.** No network access, telemetry, cloud services, or administrator rights
+  are needed. Classification uses the filename alone. Exports and logs may contain local paths;
+  review them before sharing.
 
-    If any check fails, **nothing is moved** and the reasons are listed. Undo also removes
-    folders that the batch created, but only if they are empty.
-12. **Duplicates are reported, never deleted.** Two files are duplicates only if their SHA-256
-    digests match. Files that change while being read are excluded, and hard links to one
-    file are not counted as recoverable space.
-13. **Least privilege.** The application never requests administrator rights and never runs
-    shell commands built from file names.
-14. **Privacy.** No network access, no telemetry, no cloud services and no reading of file
-    contents for classification (see the README privacy statement).
-15. **System locations are protected.** A drive or filesystem root, and any folder inside an
-    operating-system directory (for example `C:\Windows`, `C:\Program Files`, `/etc`, `/usr`),
-    is refused as a scan root. Because Organize, Duplicate Finder, Large Files, and Automation
-    all scan through the same entry point, the refusal applies everywhere - a protected folder
-    cannot be organized, watched, or duplicate-scanned. Ordinary user folders are unaffected.
+## Limits to keep in mind
 
-## Limitations
-
-- **No multi-file transaction.** Filesystems cannot commit several renames together. A batch
-  can therefore end `partial`: some files moved, some did not. History shows exactly which,
-  and each file is independently recorded.
-- **Classification is by extension only.** A file named `invoice.jpg` that is really a PDF
-  is classified as an image. The tool does not inspect contents to decide.
-- **Cross-volume moves.** Organization destinations are always inside the selected folder, so
-  moves are same-volume by construction. If a filesystem operation nevertheless reports a
-  cross-device error (or hard links are unavailable), the move fails and the source is left
-  exactly where it was: the source is only ever removed after the destination link has been
-  created and verified to be the same file object, so an interrupted or impossible move cannot
-  strand a file between volumes.
-- **Filesystems without hard-link or file-ID support.** On POSIX volumes that do not support
-  hard links (for example some FAT32, exFAT or network mounts), `move_no_overwrite` refuses
-  the move and leaves the source in place rather than falling back to `os.rename`, which on
-  POSIX could overwrite a file created concurrently. On Windows volumes without hard links,
-  `os.rename` is used because the Win32 rename call fails if the destination exists. Similarly,
-  if a filesystem provides no non-zero file identifier via `os.lstat` or an open file handle,
-  replacement checks fall back to comparing file size and modification timestamp.
-- **Undo is not a time machine.** It reverses moves only. It does not restore files you edited,
-  renamed or deleted afterwards, and it refuses rather than guessing.
-- **Monitoring is polling-based.** Changes are picked up within the configured interval
-  (default five seconds). Monitoring runs only while the application is open.
-- **Hidden and temporary files are excluded by default** (`.*`, `*.tmp`, `*.part`,
-  `*.crdownload`, `~$*`, `desktop.ini`, `Thumbs.db`). You can change these in Settings.
-- **Identity has limits.** Files are identified by device and inode together with size and
-  modification time. A replacement that reuses the same inode *and* reproduces the same size
-  and timestamp cannot be distinguished from the original by metadata; no check in this (or
-  any) tool can detect that without hashing file contents. Deterministic race tests cover
-  replacements before linking, after linking, and before unlinking, including inode reuse
-  with differing size or timestamp.
-- **Stop and Close are cooperative.** Cancellation is observed between files and between
-  hashing chunks. A single filesystem operation already in progress (one file's move, one
-  read) may finish; no further files are started afterwards. Closing the window cancels all
-  background tasks and waits for workers to finish before the database is released; if a
-  worker cannot finish in time, the window stays open rather than closing underneath it.
-- **Concurrency inside the app is coordinated.** Manual organization, undo, and watcher
-  batches share a per-folder lock; a second operation on the same folder is refused (or its
-  files are skipped) instead of racing a half-moved tree. This does not coordinate other
-  programs, which is what the identity re-validation at each move is for.
-- **A failed history write does not hide a completed move.** Moves are journaled as pending
-  before they run. If recording the outcome fails (for example a locked database), the file
-  stays moved, the result is reported to the user, and the still-pending record is marked
-  interrupted on the next start so Recovery guidance can locate the file.
+- **A batch is not atomic.** Some files may move before a later file fails, the batch is cancelled,
+  or the process stops. Undo is all-or-nothing only at preflight; changes or cancellation after it
+  starts can leave a partial restore. Edited, missing, or replaced files cannot be restored by Undo.
+- **Filesystem support varies.** The rename must be on a single volume with support for a
+  no-replace rename and verifiable directory identity. Some network or removable volumes may
+  refuse these operations. The source is not removed if the rename is refused. Device/inode,
+  size and timestamps aren't content hashes; an identical recorded signature cannot distinguish
+  two versions. On filesystems without a file ID, verification is more limited.
+- **Other programs are not locked out.** The app rechecks paths and file metadata, but those checks
+  are not a transaction with another program editing or replacing a file or directory. The native
+  rename prevents clobbering a destination; it doesn't prevent other programs from changing files
+  before or after the rename. On Windows the path checks and rename are separate operations. For
+  an explicitly approved export replacement, the final check and replacement are also separate.
+  Avoid organizing folders that other programs are actively rearranging.
+- **Monitoring uses polling, not copy-completion signals.** A stable size and timestamp are a
+  heuristic. Be careful with downloads or copies that pause for long periods. Changes to watcher
+  rules invalidate existing approvals. Stop and Close signal every watcher without waiting on
+  the Tk thread; an operation already in progress may finish, but no further files are started
+  once the worker observes cancellation. The window waits for workers before releasing the database.
 
 ## If something goes wrong
 
-**A batch finished `partial`.** Open *History*, select the batch and read the *Error / reason*
-column. Failed items usually have a cause you can fix (a file open in another program, a
-permission problem). Then either organize the remaining files again from a fresh scan, or
-undo the batch.
+**Partial or interrupted batch.** In *History*, open the batch and read *Error / reason*. Use
+**Recovery guidance…** for operations that need attention, including ones whose batch was
+previously labeled completed. A move or restore can succeed before its final history write;
+**Recovery guidance…** uses the journal to compare the recorded file to both paths:
 
-**Undo says a file was modified, moved or the original location is occupied.** Nothing was
-changed. Resolve the conflict manually (move the file back yourself or rename whatever now
-occupies the original path), then try again.
+- **Verified:** a regular file matches the recorded identity and available size and timestamp.
+  If an unrecorded forward move is verified at the destination, Undo cannot reverse that move.
+- **Missing:** the recorded path couldn't be found.
+- **Unverified:** an entry may be present but may not be the right file, or it could not be checked.
+  Inspect both paths before retrying or removing anything. Two entries can be leftover hard links
+  from a batch run by an older version. The app does not delete either for you.
 
-**The application closed during a batch.** On the next start, the batch is marked `interrupted`,
-and any operation that was still in progress is marked `interrupted` with the message
-"Application stopped before this operation finished; check the file locations manually."
-Open *History*, select the batch, and press **Recovery guidance…**: it checks where the file
-actually is now and states the safe next step for each one -
-- at the original location only: the move never happened, nothing was lost;
-- at the new location only: the move finished but was not recorded, so Undo cannot reverse it;
-- at both: the interrupted move left two copies, and both paths are named so you can compare
-  and delete one yourself (neither is deleted for you);
-- at neither: another program moved, renamed or deleted it, and you should locate it before
-  running anything else.
+**Undo refused or only partly completed.** Resolve the reported conflict before retrying. A file
+with an unrecorded restore may already be back at its original location, so inspect Recovery
+before retrying it. History can’t recover edited or deleted contents.
 
-Operations that had already finished are unaffected. Guidance is also shown automatically
-when you select a batch that ended `running`, `interrupted`, `partial` or `cancelled`.
+**Damaged history database.** The database is preserved as `history.corrupt-<timestamp>.sqlite3`
+and a new history is started. Undo isn't available for batches recorded only in the damaged copy.
 
-**The history database is damaged.** It is renamed to `history.corrupt-<timestamp>.sqlite3`
-in the data folder and a new history is started. The corrupt copy is kept so it can be
-inspected. Your organized files are not affected. Undo is not available for batches recorded
-in the damaged copy.
-
-**I want to stop monitoring.** Press *Stop* on the Automation page, or remove the folder from
-the list. Closing the application also stops monitoring. Stop is immediate: the request
-reaches the scan and the move batch, so a poll already in progress moves nothing further.
-If the folder is large and the current check has not finished, the status shows *Stopping*
-for a moment; while it does, starting again is refused rather than running a second watcher,
-and the status becomes *Stopped* on its own once the check has finished.
+**Stop watching a folder.** Press **Stop** or remove the folder from Automation. While a worker is
+finishing, its status shows *Stopping*; Start won't launch a second worker. Closing the app also
+stops monitoring. If a different process is holding a file open, allow that operation time to finish.
 
 ## Reporting a safety problem
 
-If you find a way for the tool to move, overwrite or delete a file outside the folder you
-selected, or to overwrite an existing file, please report it privately through GitHub's
-security advisory feature instead of a public issue.
-- **Recovery states are explicit.** Undo journals its intent (`undoing`) before restoring each
-  file. If the outcome cannot be recorded, the batch is left as `undo_partial` and Recovery
-  guidance verifies the file against its recorded identity at its original or organized
-  location, and says plainly when a location can only be reported as unverified.
-- **One primary instance per data folder.** Startup recovery runs only in the instance that
-  holds the data folder's instance lock, so a second instance cannot mark the first instance's
-  in-progress work as interrupted.
+If you find a way for the app to unexpectedly move, overwrite, or delete files, use GitHub's
+private security advisory feature rather than a public issue. Remove personal paths from any logs
+or reports you share.

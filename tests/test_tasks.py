@@ -47,3 +47,61 @@ def test_shutdown_reports_false_while_a_worker_ignores_cancellation() -> None:
     assert runner.submit("op", stubborn, on_success=lambda _r: None, on_error=lambda _m: None)
     assert runner.shutdown(timeout=0.05) is False, "a live worker must block resource release"
     assert runner.shutdown(timeout=5.0) is True
+
+
+def test_finished_worker_connections_are_not_retained(database) -> None:
+    widget = _FakeWidget()
+    runner = TaskRunner(widget, worker_cleanup=database.close_thread_connection)
+    main_connection = database.connection()
+    completed = []
+    for index in range(8):
+        assert runner.submit(
+            "work",
+            lambda _task: database.query("SELECT 1")[0][0],
+            on_success=completed.append,
+            on_error=lambda reason: (_ for _ in ()).throw(AssertionError(reason)),
+        )
+        deadline = time.monotonic() + 5
+        while runner.workers_active() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        runner._drain()
+        assert completed == [1] * (index + 1)
+        assert database._connections == {main_connection}
+
+
+def test_failed_worker_bootstrap_closes_only_its_connection(database, monkeypatch) -> None:
+    import sqlite3
+
+    from smart_file_organizer.database import db as db_module
+
+    existing = database.connection()
+    connect = sqlite3.connect
+    failed = threading.Event()
+    closed = threading.Event()
+
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql == "PRAGMA journal_mode = WAL":
+                raise sqlite3.OperationalError("bootstrap failed")
+            return super().execute(sql, *args)
+
+        def close(self):
+            super().close()
+            closed.set()
+
+    monkeypatch.setattr(db_module.sqlite3, "connect", lambda *a, **kw: connect(*a, factory=FailingConnection, **kw))
+
+    def worker():
+        try:
+            database.connection()
+        except sqlite3.OperationalError:
+            failed.set()
+        finally:
+            database.close_thread_connection()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive() and failed.is_set() and closed.is_set()
+    assert database._connections == {existing}
+    assert existing.execute("SELECT 1").fetchone()[0] == 1

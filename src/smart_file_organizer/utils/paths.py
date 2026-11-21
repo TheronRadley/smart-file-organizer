@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 APP_DIR_NAME = "SmartFileOrganizer"
@@ -51,11 +52,24 @@ def normalise(path: Path | str) -> str:
 
 def is_within(path: Path | str, root: Path | str) -> bool:
     """Return True when ``path`` is ``root`` or lies inside it (after resolving links)."""
-    candidate = normalise(path)
-    base = normalise(root)
-    if candidate == base:
+    return _resolved_within(normalise(path), normalise(root))
+
+
+def _resolved_within(candidate: str, base: str) -> bool:
+    if candidate == base or candidate.startswith(base.rstrip(os.sep) + os.sep):
         return True
-    return candidate.startswith(base.rstrip(os.sep) + os.sep)
+    # POSIX may use a case-insensitive volume, while normcase() is a no-op.
+    # A folded match is only a hint; the existing directory must be the same object.
+    test_path, test_root = candidate.casefold(), base.casefold()
+    if sys.platform == "darwin":
+        test_path, test_root = unicodedata.normalize("NFD", test_path), unicodedata.normalize("NFD", test_root)
+    if test_path != test_root and not test_path.startswith(test_root.rstrip(os.sep) + os.sep):
+        return False
+    prefix = Path(*Path(candidate).parts[: len(Path(base).parts)])
+    try:
+        return os.path.samefile(prefix, base)
+    except OSError:
+        return False
 
 
 def ensure_within(path: Path | str, root: Path | str) -> Path:
@@ -98,18 +112,18 @@ def protected_root_reason(path: Path | str) -> str | None:
     """Return why ``path`` is a protected location, or None when it is not.
 
     A location is protected when it is a filesystem or drive root, or when it
-    is (or is inside) an operating-system directory. Organizing, watching, or
-    duplicate-scanning such a location could move system files, so every entry
-    point that scans a user-selected root refuses it. User folders such as
-    Documents, Downloads, or a temporary test folder are never protected.
+    is (or is inside) an operating-system directory or the active app data
+    folder. Every scan or move rooted at one of these locations is refused.
     """
     candidate = Path(os.path.abspath(os.fspath(path)))
     if candidate.parent == candidate:
         return "a drive or filesystem root"
+    if is_within(candidate, app_data_dir()):
+        return "the application data folder"
     resolved = normalise(candidate)
     for system_root in _system_roots():
         protected = normalise(system_root)
-        if resolved == protected or resolved.startswith(protected.rstrip(os.sep) + os.sep):
+        if _resolved_within(resolved, protected):
             return f"the system folder '{system_root}'"
     return None
 

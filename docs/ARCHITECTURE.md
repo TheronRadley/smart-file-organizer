@@ -26,13 +26,15 @@ and the interface never reimplements a rule.
 | Path | Responsibility |
 | --- | --- |
 | `app.py` (root) | Source-checkout launcher; adds `src/` to the path and calls `main()`. |
-| `src/smart_file_organizer/main.py` | Startup: data folder, logging, settings, database, window. |
+| `src/smart_file_organizer/main.py` | Startup: exclusive data-folder lease, settings, journal recovery, and window. |
 | `config.py` | Default category rules, the `Settings` dataclass, JSON load and atomic save. |
 | `core/models.py` | Plain dataclasses shared across layers: `FileEntry`, `ScanResult`, `OrganizePlan`, `BatchOutcome`, and history records. |
 | `core/scanner.py` | Iterative directory walk with exclusions, cancellation, progress and per-item error capture. |
 | `core/classifier.py` | Extension → category → destination folder. Never opens files. |
-| `core/organizer.py` | `build_plan` (pure) and `execute_plan` (guarded I/O). |
-| `core/fileops.py` | `move_no_overwrite`: the single primitive that moves files, with an identity-checked rollback; `open_read_no_follow`: the single primitive that opens files for reading. |
+| `core/organizer.py` | `build_plan` (read-only) and `execute_plan` (guarded mutation). |
+| `core/fileops.py` | `move_no_overwrite`: native atomic no-replace rename; `open_read_no_follow`: guarded read handle. |
+| `core/boundary.py` | Approved root and directory identities, private data exclusion, and descriptor-relative POSIX mutations. |
+| `core/operation_guard.py` | Exclusion for overlapping file operations and history clearing. |
 | `core/undo.py` | `preview_undo` (read-only checks) and `undo_batch` (all-or-nothing preflight, then guarded moves). |
 | `core/history.py` | `HistoryRepository`: batches, operations, scan summaries, statistics, recovery. |
 | `core/duplicates.py` | Size grouping, partial and full SHA-256 hashing, change detection. |
@@ -64,38 +66,39 @@ and the interface never reimplements a rule.
       regular file inside the root.
    2. Ensure the destination folder is a plain folder inside the root, creating it if needed
       (recorded as a `create_folder` operation).
-   3. Pick a final name. Existing files are never overwritten.
-   4. Record a `pending` operation row, move with `move_no_overwrite`, then update the row to
-      `success` or `failed`. A crash between steps leaves `pending`, which becomes `interrupted`
-      on the next start.
-5. The batch is finished with `completed`, `partial` or `cancelled`.
+   3. Keep the exact approved destination. A late collision skips the move rather than replacing
+      the target or picking a different name; only opt-in automatic mode can replan a name.
+   4. Record a `pending` operation row, then recheck the root, directories and full file signature
+      in `move_no_overwrite`. Update the row with the outcome. A crash between steps leaves it
+      `pending`, which becomes `interrupted` on the next start; History surfaces it either way.
+5. The batch ends as `completed`, `partial`, `cancelled` or `interrupted` when an outcome could
+   not be recorded. History uses operation rows as well as batch status to discover unresolved work.
 
 ### Undo
 
 1. `preview_undo` lists every successful move not yet undone and checks each against the
    filesystem (`_check_move`). Nothing is changed.
 2. If any item is blocked, `undo_batch` refuses and returns the reasons.
-3. Otherwise each move is re-checked and reversed with `move_no_overwrite`. Empty folders the
-   batch created are removed. The batch is marked `undone`, or `undo_partial` if something failed,
-   in which case the remaining moves can be retried.
+3. Otherwise each restore is journaled as `undoing` and guarded again by `move_no_overwrite`.
+   A recorded folder is only removed if it is still the same directory and empty. A partial or
+   unresolved restore remains visible for retry or recovery.
 
 ### Folder monitoring
 
-`FolderWatcher.poll_once` rescans the folder, builds a plan, and considers only files whose
-size and timestamp have been stable for `stable_seconds` (10 s). Each handled file is remembered
-by (path, size, mtime), so it is not processed again unless it changes. Preview mode stores the
-stable files as pending. Auto-apply executes them through the same `execute_plan` path, so all
-collision, exclusion and revalidation rules apply.
+`FolderWatcher.poll_once` uses one ruleset for classification, exclusions, and planning. It
+considers files stable by path, size, mtime and file ID. The Automation page renders an immutable
+pending snapshot and passes that exact snapshot to the worker on approval. Rule changes cancel
+work using the old rules and invalidate its approvals. Auto-apply is a separate explicit opt-in.
 
 ## Threading model
 
-- The Tk main thread owns all widgets. It never blocks on I/O.
-- `TaskRunner.submit` runs work on a daemon thread. Progress, results and errors are placed on a
-  queue and delivered to the main thread by polling with `after` (about every 40 ms).
-- Each thread gets its own SQLite connection (`Database.connection`), so workers and the UI never
-  share a connection. Writes use `BEGIN IMMEDIATE`, and WAL mode lets readers proceed during writes.
-- Cancellation is cooperative: workers check a `threading.Event` between files.
-- Monitoring threads are daemon threads with a stop event; `WatchManager.stop_all` runs on close.
+- The Tk main thread owns all widgets. `TaskRunner` queues progress and outcomes from workers
+  and delivers them via `after`.
+- SQLite connections are per-thread. Task workers and watcher workers release their own
+  connections at teardown. Writes use `BEGIN IMMEDIATE`, readers can proceed in WAL mode.
+- Close signals task cancellation and all watchers before doing any waiting. An `after` callback
+  polls for worker exit before the database and instance lock are released. Stop broadcasts to
+  all watchers and returns immediately; the page updates their status as they exit.
 
 ## Data
 
@@ -107,12 +110,13 @@ collision, exclusion and revalidation rules apply.
 
 Override the location with the `SFO_DATA_DIR` environment variable (used by the test-suite).
 
-### Schema (version 1)
+### Schema (version 2)
 
-- `batches(id, kind, root_name, root_path, dry_run, status, created_at, finished_at, note)`
+- `batches(id, kind, root_name, root_path, dry_run, status, created_at, finished_at, note, root_identity)`
 - `operations(id, batch_id → batches, op_type, source_path, destination_path, size_bytes,
   modified_ns, file_id, status, error, created_at, undo_status, undo_error, undone_at)`
-  with indexes on `batch_id`, `status`, and `batches.created_at`.
+  with indexes on `batch_id`, `status`, `undo_status`, and `batches.created_at`. For folder creation
+  rows, `file_id` records the directory identity used by Undo cleanup.
 - `scans(id, root_name, file_count, folder_count, total_bytes, category_counts, issue_count, created_at)`
 
 ## Design decisions
@@ -121,9 +125,10 @@ Override the location with the `SFO_DATA_DIR` environment variable (used by the 
   use the standard library. Polling was chosen over OS notifications for portability.
 - **Per-file moves, batch-level undo.** Filesystems cannot commit multiple renames atomically, so
   each move is an independent, recorded step. Undo is all-or-nothing at preflight time.
-- **Plans are pure data.** `OrganizePlan` can be inspected, dry-run and serialized without I/O,
-  which keeps previews and actual execution identical.
-- **Only the application's own database is ever renamed,** and only when it is corrupt.
+- **Plans are snapshots.** `OrganizePlan` records proposed paths and their metadata. Dry run and
+  apply both recheck the current filesystem; apply also enforces native no-clobber publication.
+- **Database corruption handling** preserves only the app’s history database and its companion files.
+  It never tries to recreate the contents of user files.
 - **Results on screen are "current" and history is "recorded".** The dashboard keeps them apart.
 
 ## Testing
@@ -131,3 +136,7 @@ Override the location with the `SFO_DATA_DIR` environment variable (used by the 
 `tests/` mirrors the core modules. Every test uses temporary directories and synthetic data,
 and `conftest.py` redirects the data folder so the real profile is never read or written. Symlink
 and permission tests skip themselves where the environment does not allow them.
+
+Windows CI also launches the **packaged executable**, navigates its pages, and runs a preview,
+apply and undo against a synthetic file and an isolated data directory. The build and smoke
+scripts in `scripts/` are also the local developer entry points.

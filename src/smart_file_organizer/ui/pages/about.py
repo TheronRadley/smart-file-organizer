@@ -17,9 +17,9 @@ PRIVACY = (
 LIMITS = (
     "• Classification uses file extensions only; a misnamed file is organized by its extension.\n"
     "• Moves are applied one file at a time. The filesystem offers no multi-file transaction, so a batch can "
-    "end partly applied; "
-    "History shows exactly which files moved.\n"
-    "• Undo is refused when a file was edited, replaced, or its original location is occupied.\n"
+    "end partly applied. Check History and Recovery guidance if an outcome wasn't recorded.\n"
+    "• Undo requires a recorded move, an unchanged file and a free original location.\n"
+    "• A volume without safe no-overwrite rename support is not used for moves.\n"
     "• Monitoring polls for changes (default every 5 seconds); it does not run when the app is closed.\n"
     "• Duplicate detection only reports copies. Deleting anything is left to you."
 )
@@ -27,7 +27,7 @@ LIMITS = (
 
 class AboutPage(BasePage):
     title = "About"
-    description = "Smart File Organizer is an open-source desktop tool for safe, previewable file organization."
+    description = "Smart File Organizer is a source-available desktop tool for safe, previewable file organization."
 
     def build(self, body: ctk.CTkFrame) -> None:
         body.grid_columnconfigure(0, weight=1)

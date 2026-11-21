@@ -31,7 +31,7 @@ def find_large_files(
     limit: int | None = None,
 ) -> LargeFileReport:
     """Return files of at least ``min_bytes``, largest first, optionally filtered by extension."""
-    wanted = {extension.lower().lstrip(".") for extension in extensions if extension.strip()}
+    wanted = {extension.strip().lower().lstrip(".") for extension in extensions if extension.strip()}
     matches = [entry for entry in scan.entries if entry.size >= min_bytes and (not wanted or entry.extension in wanted)]
     matches.sort(key=lambda entry: (-entry.size, entry.relative_path.casefold()))
     if limit is not None:

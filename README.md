@@ -7,8 +7,8 @@
 **Sort your files - with a preview, a safety net, and an undo button.**
 
 Smart File Organizer is a Windows desktop app that organizes messy folders
-without ever overwriting, deleting, or surprising you. Every move is previewed
-first, recorded in history, and reversible.
+with a preview, guarded moves, and a local history. Automation without preview is opt-in.
+Undo is available for recorded moves when the files and their original locations still pass safety checks.
 
 <br>
 
@@ -31,9 +31,9 @@ first, recorded in history, and reversible.
 
 Most organizers move first and explain later. This one is built the other way around:
 
-- **Preview before anything moves.** Scan a folder, inspect the exact plan, run a dry run, then apply only the moves you selected.
-- **Built to never overwrite or delete.** Collisions are renamed (`name (2).ext`) or skipped, moves are identity-checked at the moment they run, and anything that cannot be verified fails closed - see [Safety](docs/SAFETY.md) for the exact guarantees and their limits.
-- **Every move can be undone.** Batches are recorded in a local history and reversed only when every file is exactly where it was left; otherwise nothing changes and you are told why.
+- **Preview before manual moves.** Scan a folder, inspect the exact plan, run a dry run, then apply only the moves you selected.
+- **No-clobber moves.** Previews show how collisions will be handled. Approved moves use the platform’s non-replacing rename and are refused if the destination is no longer free - see [Safety](docs/SAFETY.md) for the exact guarantees and their limits.
+- **Guarded undo and recovery.** History can reverse recorded moves whose files and original locations still pass validation. Interrupted operations are surfaced for recovery; see [Safety](docs/SAFETY.md) for when Undo is unavailable.
 - **Private by design.** Everything runs on your machine. No accounts, no network requests, no telemetry.
 
 ## Features
@@ -43,16 +43,16 @@ Most organizers move first and explain later. This one is built the other way ar
 | **Organize** | Sort by type (10 categories + Other), extension, or modified month - with per-file selection and collision handling |
 | **Duplicate Finder** | Groups identical files by size and SHA-256, reports recoverable space, and never deletes anything |
 | **Large Files** | Surfaces the biggest files above a threshold, with honest incomplete-result warnings |
-| **Automation** | Optional folder monitoring - preview-first by default, waits for files to finish copying, stop means stop |
-| **History & Recovery** | Full audit trail, guarded undo, and step-by-step guidance for batches interrupted mid-run |
+| **Automation** | Optional folder monitoring - preview-first by default, waits for files to appear stable, supports cooperative stop |
+| **History & Recovery** | Local move journal, guarded undo, and guidance for interrupted work |
 | **Reports** | Export history, scans, and duplicate reports to spreadsheet-safe CSV or JSON |
 
 ## Safety at a glance
 
-- Symbolic links and Windows junctions are never followed
-- Source files are re-validated by identity immediately before each move
+- Detected symbolic links and Windows junctions are skipped; the app’s own data folder is excluded
+- Source type, identity (when available), size and modification time are rechecked before each move
 - Exports refuse to silently overwrite an existing report
-- A stopped watcher starts no new moves and never runs two workers (a single file operation already in progress may finish)
+- Stop cancels watcher work without waiting on the window thread; a file operation already in progress may finish
 
 The full guarantees, limits, and threat model live in **[docs/SAFETY.md](docs/SAFETY.md)**.
 
@@ -69,16 +69,24 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-<sub>macOS/Linux equivalent: `python3.12 -m venv .venv && source .venv/bin/activate`, then the same `pip install` and `python app.py`. You can also `pip install .` to get the `smart-file-organizer` command.</sub>
+On macOS and Linux, use `python3.12 -m venv .venv && source .venv/bin/activate`, then install and
+run the same way. A desktop session and Tcl/Tk for your Python are required: run `python -m tkinter`
+in the environment and check that a small window opens. If Tk is missing, install the Tk package
+for your Python (for example `python3-tk` on Debian/Ubuntu for the distro Python, or
+`brew install python-tk@3.12` for Homebrew Python 3.12). `pip install .` also provides the
+`smart-file-organizer` command; use the pinned requirements when reproducing CI.
 
 ## Building the Windows executable
 
 ```powershell
 python -m pip install -r requirements-dev.txt
-pyinstaller --noconfirm --clean --windowed --name SmartFileOrganizer --paths src --collect-all customtkinter app.py
+python scripts/build_windows.py
+python scripts/smoke_windows.py
 ```
 
-Output: `dist\SmartFileOrganizer\SmartFileOrganizer.exe` - the same command runs in the **Windows build** GitHub Actions workflow.
+Output: `dist\SmartFileOrganizer\SmartFileOrganizer.exe`. The **Windows build** workflow uses
+these same scripts, launching the packaged executable in a temporary profile and checking a
+preview → apply → undo round trip before uploading the artifact.
 
 ## Development
 
@@ -89,7 +97,7 @@ ruff check .
 ruff format --check .
 ```
 
-CI additionally runs a Windows GUI startup smoke test and a `pip-audit` dependency audit. Manual checks that need a real Windows desktop are listed in [docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md).
+CI also runs a Windows source GUI smoke test, the packaged round trip, and a `pip-audit` dependency audit. Manual checks that need a real Windows desktop are listed in [docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md).
 
 ## Where your data lives
 
@@ -99,7 +107,7 @@ CI additionally runs a Windows GUI startup smoke test and a `pip-audit` dependen
 | History | `%APPDATA%\SmartFileOrganizer\history.sqlite3` |
 | Log | `%APPDATA%\SmartFileOrganizer\app.log` |
 
-Set `SFO_DATA_DIR` to use a different folder.
+Set `SFO_DATA_DIR` to use a different folder. The app excludes that folder from organization and allows only one running instance per data directory.
 
 ## Status
 

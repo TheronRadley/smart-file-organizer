@@ -1,306 +1,158 @@
-"""Fault-injection tests for the guarded move and read primitives.
+"""Guarded move and read primitives, tested only on synthetic files."""
 
-The interesting failures here are the ones the filesystem produces *between*
-two calls: the source cannot be removed after the link was created, and the
-destination is replaced by another program while the rollback runs. Deleting a
-file this tool did not create is treated as worse than leaving an extra link.
-"""
-
+import errno
 import os
 from pathlib import Path
 
 import pytest
 
 from smart_file_organizer.core import fileops
-from smart_file_organizer.core.fileops import (
-    MoveRollbackError,
-    SourceChangedError,
-    move_no_overwrite,
-    open_read_no_follow,
-)
+from smart_file_organizer.core.boundary import BoundaryError, directory_identity
+from smart_file_organizer.core.fileops import SourceChangedError, move_no_overwrite, open_read_no_follow
+from smart_file_organizer.core.scanner import file_identity
 
 from .conftest import make_file, symlinks_supported
 
 
-def _is_source(path: object, workspace: Path) -> bool:
-    candidate = Path(os.fspath(path))
-    return candidate.name == "source.txt" and candidate.parent == workspace
+def test_move_uses_no_link_or_unlink(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """There is no intermediate second link and no cleanup unlink in the move path."""
+    source = make_file(workspace / "source.txt", b"original")
+    destination = workspace / "destination.txt"
 
+    def forbidden(*args, **kwargs):
+        pytest.fail("Safe moves must not use a two-operation link/unlink sequence")
 
-def _fail_unlink_of_source(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Make removing the source fail, and record every path an unlink was asked for."""
-    real_unlink = os.unlink
-    requested: list[Path] = []
-
-    def failing_unlink(path, *args, **kwargs):
-        requested.append(Path(os.fspath(path)))
-        if _is_source(path, workspace):
-            raise PermissionError(13, "Permission denied", str(path))
-        return real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(fileops.os, "unlink", failing_unlink)
-    return requested
-
-
-def test_failed_source_removal_removes_the_link_it_created(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    source = make_file(workspace / "source.txt", b"payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-    requested = _fail_unlink_of_source(workspace, monkeypatch)
-
-    with pytest.raises(PermissionError):
+    with monkeypatch.context() as patch:
+        patch.setattr(fileops.os, "link", forbidden)
+        patch.setattr(fileops.os, "unlink", forbidden)
         move_no_overwrite(source, destination)
-
-    assert source.read_bytes() == b"payload", "the original must survive a failed move"
-    assert not destination.exists(), "the extra link this move created must be removed again"
-    assert [path.name for path in requested] == ["source.txt", "source.txt"]
+    assert not source.exists()
+    assert destination.read_bytes() == b"original"
 
 
-def test_rollback_never_deletes_a_destination_replaced_by_another_program(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = make_file(workspace / "source.txt", b"payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-    real_unlink = os.unlink
-    replacement = b"written by another program"
+def test_failing_native_move_does_not_clean_up_another_file(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_file(workspace / "source.txt", b"original")
+    destination = workspace / "destination.txt"
 
-    def failing_unlink(path, *args, **kwargs):
-        if _is_source(path, workspace):
-            # The instant our removal of the source fails, somebody else takes
-            # over the destination path with a file of their own.
-            real_unlink(destination)
-            destination.write_bytes(replacement)
-            raise PermissionError(13, "Permission denied", str(path))
-        return real_unlink(path, *args, **kwargs)
+    def competing_entry(*args, **kwargs):
+        make_file(destination, b"not ours")
+        raise FileExistsError(errno.EEXIST, "Destination already exists")
 
-    monkeypatch.setattr(fileops.os, "unlink", failing_unlink)
-
-    with pytest.raises(MoveRollbackError) as info:
+    monkeypatch.setattr(fileops, "_rename_no_replace", competing_entry)
+    with pytest.raises(FileExistsError):
         move_no_overwrite(source, destination)
-
-    assert destination.read_bytes() == replacement, "a file written by another program must survive the rollback"
-    assert source.read_bytes() == b"payload"
-    assert str(destination) in info.value.recovery
-    assert "kept" in info.value.recovery
+    assert source.read_bytes() == b"original"
+    assert destination.read_bytes() == b"not ours"
 
 
-def test_rollback_keeps_the_link_when_identity_cannot_be_verified(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = make_file(workspace / "source.txt", b"payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-    real_unlink = os.unlink
-    real_lstat = os.lstat
-
-    def unlink_failing_on_source(path, *args, **kwargs):
-        if _is_source(path, workspace):
-            raise PermissionError(13, "Permission denied", str(path))
-        return real_unlink(path, *args, **kwargs)
-
-    def lstat_without_inode_numbers(path, *args, **kwargs):
-        stats = real_lstat(path, *args, **kwargs)
-        if _is_source(path, workspace):
-            return stats
-        # A filesystem that reports no inode number: identity cannot be proved.
-        return os.stat_result(
-            (stats.st_mode, 0, 0, stats.st_nlink, 0, 0, stats.st_size, stats.st_atime, stats.st_mtime, stats.st_ctime)
-        )
-
-    monkeypatch.setattr(fileops.os, "unlink", unlink_failing_on_source)
-    monkeypatch.setattr(fileops.os, "lstat", lstat_without_inode_numbers)
-
-    with pytest.raises(MoveRollbackError):
+def test_unsupported_native_move_fails_without_fallback(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if os.name != "posix":
+        pytest.skip("The native no-replace API is mandatory on POSIX")
+    source = make_file(workspace / "source.txt", b"original")
+    destination = workspace / "destination.txt"
+    monkeypatch.setattr(fileops, "_posix_rename", lambda: None)
+    with pytest.raises(OSError, match="atomic no-overwrite"):
         move_no_overwrite(source, destination)
-
-    assert destination.exists(), "without proof of identity the extra copy is kept, not deleted"
-    assert source.read_bytes() == b"payload"
-
-
-def test_source_replaced_by_a_symlink_is_refused_not_followed(workspace: Path, tmp_path: Path) -> None:
-    if not symlinks_supported(tmp_path):
-        pytest.skip("Symbolic links are not permitted in this environment")
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"outside content")
-    link = workspace / "link.txt"
-    os.symlink(outside, link)
-    destination = workspace / "Documents" / "link.txt"
-    destination.parent.mkdir()
-
-    with pytest.raises(OSError) as info:
-        move_no_overwrite(link, destination)
-
-    assert "not a regular file" in str(info.value.strerror)
-    assert os.path.islink(link), "the link itself must be left alone"
-    assert outside.read_bytes() == b"outside content"
+    assert source.read_bytes() == b"original"
     assert not destination.exists()
+
+
+def test_move_revalidates_size_and_timestamp_even_with_the_same_id(workspace: Path) -> None:
+    source = make_file(workspace / "source.txt", b"payload")
+    destination = workspace / "destination.txt"
+    old = source.stat()
+    identity = file_identity(old, source)
+    source.write_bytes(b"changed")  # Same size and inode, but changed in place.
+    os.utime(source, ns=(old.st_atime_ns, old.st_mtime_ns + 10_000_000_000))
+    assert file_identity(source.lstat(), source) == identity
+    with pytest.raises(SourceChangedError, match="modification time"):
+        move_no_overwrite(
+            source,
+            destination,
+            expected_identity=identity,
+            expected_size=old.st_size,
+            expected_modified_ns=old.st_mtime_ns,
+        )
+    assert source.read_bytes() == b"changed"
+    assert not destination.exists()
+
+
+def test_move_rejects_a_replaced_root(workspace: Path) -> None:
+    root_id = directory_identity(workspace)
+    workspace.rename(workspace.with_name("previous-root"))
+    workspace.mkdir()
+    source = make_file(workspace / "source.txt", b"different root")
+    with pytest.raises(BoundaryError, match="selected folder changed"):
+        move_no_overwrite(source, workspace / "destination.txt", root=workspace, root_identity=root_id)
+    assert source.read_bytes() == b"different root"
+
+
+def test_move_rejects_a_source_link(workspace: Path) -> None:
+    if not symlinks_supported(workspace):
+        pytest.skip("Symbolic links are not permitted in this environment")
+    source = make_file(workspace / "source.txt", b"original")
+    link = workspace / "link.txt"
+    link.symlink_to(source)
+    with pytest.raises(SourceChangedError, match="regular file"):
+        move_no_overwrite(link, workspace / "destination.txt")
+    assert link.is_symlink()
+    assert source.read_bytes() == b"original"
 
 
 def test_move_is_refused_when_the_source_is_no_longer_the_scanned_file(workspace: Path) -> None:
     source = make_file(workspace / "source.txt", b"payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-
-    with pytest.raises(SourceChangedError) as info:
+    destination = workspace / "destination.txt"
+    with pytest.raises(SourceChangedError, match="approved file"):
         move_no_overwrite(source, destination, expected_identity="424242:987654321")
-
-    assert "replaced" in str(info.value.strerror)
-    assert source.read_bytes() == b"payload"
+    assert source.is_file()
     assert not destination.exists()
 
 
 def test_move_accepts_the_identity_recorded_at_scan_time(workspace: Path) -> None:
-    from smart_file_organizer.core.scanner import file_identity
-
     source = make_file(workspace / "source.txt", b"payload")
-    identity = file_identity(os.lstat(source), source)
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-
+    destination = workspace / "destination.txt"
+    identity = file_identity(source.stat(), source)
     move_no_overwrite(source, destination, expected_identity=identity)
-
-    assert destination.read_bytes() == b"payload"
     assert not source.exists()
+    assert file_identity(destination.stat(), destination) == identity
 
 
-@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW is POSIX-only")
-def test_open_read_no_follow_refuses_a_symlink(workspace: Path, tmp_path: Path) -> None:
-    if not symlinks_supported(tmp_path):
+def test_open_read_no_follow_refuses_a_symlink(workspace: Path) -> None:
+    if not symlinks_supported(workspace):
         pytest.skip("Symbolic links are not permitted in this environment")
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"outside content")
+    source = make_file(workspace / "source.txt", b"payload")
     link = workspace / "link.txt"
-    os.symlink(outside, link)
-
+    link.symlink_to(source)
     with pytest.raises(OSError):
         open_read_no_follow(link)
 
 
 def test_open_read_no_follow_reports_the_handle_it_opened(workspace: Path) -> None:
-    from smart_file_organizer.core.scanner import file_identity
-
-    path = make_file(workspace / "real.txt", b"content")
-    handle, stats = open_read_no_follow(path)
+    source = make_file(workspace / "source.txt", b"payload")
+    handle, stats = open_read_no_follow(source)
     with handle:
-        assert handle.read() == b"content"
-        assert stats.st_size == len(b"content")
-        assert file_identity(stats, path) == file_identity(os.lstat(path), path)
+        assert stats.st_size == 7
+        assert handle.read() == b"payload"
+        assert file_identity(stats, source) == file_identity(source.lstat(), source)
 
 
-# ----- deterministic source-replacement races (audit P0) -------------------
+def test_cancellation_during_final_validation_prevents_rename(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from threading import Event
 
+    from smart_file_organizer.core.boundary import BoundDirectory
+    from smart_file_organizer.core.fileops import MoveCancelled
 
-def test_source_replaced_between_link_and_unlink_is_never_deleted(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = make_file(workspace / "source.txt", b"validated payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-    real_link = os.link
-
-    def link_then_replace(src, dst, *args, **kwargs):
-        real_link(src, dst)
-        # Another process replaces the source path after the link exists.
-        os.unlink(src)
-        Path(src).write_bytes(b"unrelated replacement")
-
-    monkeypatch.setattr(fileops.os, "link", link_then_replace)
-
-    with pytest.raises(MoveRollbackError) as info:
-        move_no_overwrite(source, destination)
-
-    assert source.read_bytes() == b"unrelated replacement", "the replacement must never be unlinked"
-    assert destination.read_bytes() == b"validated payload", "the only remaining copy of the validated file is kept"
-    assert str(source) in info.value.recovery and str(destination) in info.value.recovery
-
-
-def test_source_replaced_before_link_is_not_moved(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    source = make_file(workspace / "source.txt", b"validated payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-    real_link = os.link
-
-    def replace_then_link(src, dst, *args, **kwargs):
-        os.unlink(src)
-        Path(src).write_bytes(b"replacement")
-        return real_link(src, dst)
-
-    monkeypatch.setattr(fileops.os, "link", replace_then_link)
-
-    with pytest.raises(SourceChangedError):
-        move_no_overwrite(source, destination)
-
-    assert source.read_bytes() == b"replacement"
-    assert not destination.exists(), "the link to the unvalidated replacement must be rolled back"
-
-
-def test_failed_rollback_cleanup_is_reported_with_both_paths(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = make_file(workspace / "source.txt", b"payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
+    destination = workspace / "destination.txt"
+    cancel = Event()
+    stat_entry = BoundDirectory.stat_entry
 
-    def always_fail_unlink(path, *args, **kwargs):
-        raise PermissionError(13, "Permission denied", str(path))
+    def stat_then_cancel(directory, name):
+        stats = stat_entry(directory, name)
+        cancel.set()
+        return stats
 
-    monkeypatch.setattr(fileops.os, "unlink", always_fail_unlink)
-
-    with pytest.raises(MoveRollbackError) as info:
-        move_no_overwrite(source, destination)
-
-    assert destination.exists(), "the un-removable extra link stays, and must be reported, not silently suppressed"
-    assert str(source) in info.value.recovery and str(destination) in info.value.recovery
-
-
-def test_destination_disappearing_after_link_aborts_without_deleting_source(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = make_file(workspace / "source.txt", b"payload")
-    destination = workspace / "Documents" / "source.txt"
-    destination.parent.mkdir()
-    real_link = os.link
-
-    def link_then_remove_destination(src, dst, *args, **kwargs):
-        real_link(src, dst)
-        os.unlink(dst)  # destination vanishes immediately after linking
-
-    monkeypatch.setattr(fileops.os, "link", link_then_remove_destination)
-
-    with pytest.raises(MoveRollbackError):
-        move_no_overwrite(source, destination)
-
-    assert source.read_bytes() == b"payload", "aborting must leave the source in place"
-    assert not destination.exists()
-
-
-def test_destination_parent_swapped_for_symlink_before_link_is_refused(
-    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from .conftest import symlinks_supported
-
-    if not symlinks_supported(tmp_path):
-        pytest.skip("Symbolic links are not permitted in this environment")
-    outside = tmp_path / "outside-target"
-    outside.mkdir()
-    source = make_file(workspace / "source.txt", b"payload")
-    destination_dir = workspace / "Documents"
-    destination_dir.mkdir()
-    destination = destination_dir / "source.txt"
-    real_link = os.link
-
-    def swap_parent_then_link(src, dst, *args, **kwargs):
-        moved = workspace / "Documents-real"
-        destination_dir.rename(moved)
-        os.symlink(outside, destination_dir, target_is_directory=True)
-        try:
-            return real_link(src, dst)
-        finally:
-            pass
-
-    monkeypatch.setattr(fileops.os, "link", swap_parent_then_link)
-
-    with pytest.raises(SourceChangedError):
-        move_no_overwrite(source, destination)
-
-    assert source.read_bytes() == b"payload"
-    assert not (outside / "source.txt").exists(), "the redirected link must be removed, nothing kept outside"
+    monkeypatch.setattr(BoundDirectory, "stat_entry", stat_then_cancel)
+    with pytest.raises(MoveCancelled):
+        move_no_overwrite(source, destination, cancel_event=cancel)
+    assert source.read_bytes() == b"payload" and not destination.exists()

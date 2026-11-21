@@ -37,4 +37,6 @@ class AppContext:
         return Classifier.from_settings(self.settings)
 
     def save_settings(self) -> None:
+        # Apply safety changes in memory first, even if the profile cannot be saved.
+        self.watches.update_settings(self.settings)
         save_settings(self.settings, self.settings_path)

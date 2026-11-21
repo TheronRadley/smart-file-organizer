@@ -54,3 +54,11 @@ def test_large_files_are_never_deleted(workspace: Path, recursive_options: ScanO
     make_file(workspace / "huge.bin", b"x" * 1000)
     find_large_files(scan_folder(workspace, recursive_options), min_bytes=1)
     assert (workspace / "huge.bin").exists()
+
+
+def test_extension_filter_accepts_spaces_after_commas(workspace: Path, options: ScanOptions) -> None:
+    a = make_file(workspace / "notes.txt")
+    b = make_file(workspace / "table.csv")
+    make_file(workspace / "report.pdf")
+    result = find_large_files(scan_folder(workspace, options), min_bytes=0, extensions=["txt", " .CSV"])
+    assert {entry.path for entry in result.files} == {a, b}

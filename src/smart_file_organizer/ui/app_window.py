@@ -41,7 +41,8 @@ class App(ctk.CTk):
         self.minsize(1040, 700)
         theme.configure_appearance(context.settings.theme)
         self.configure(fg_color=theme.BG)
-        self.runner = TaskRunner(self)
+        self._closing = False
+        self.runner = TaskRunner(self, worker_cleanup=context.database.close_thread_connection)
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -185,39 +186,29 @@ class App(ctk.CTk):
 
     # ----- lifecycle ---------------------------------------------------
 
+    @property
+    def is_closing(self) -> bool:
+        return self._closing
+
     def on_close(self) -> None:
-        if self.runner.any_busy():
-            if not dialogs.confirm(
-                self,
-                "Operation in progress",
-                "A scan or file operation is still running. Closing will cancel it safely: "
-                "the current file operation finishes, no further files are touched, and anything "
-                "already moved stays recorded. Close and cancel?",
-            ):
-                return
-            self.notify("Cancelling running operations before closing...")
-            if not self.runner.shutdown(timeout=10.0):
-                # A worker is still finishing a filesystem operation. Closing
-                # (and releasing the database) underneath it is not safe, so
-                # the window stays open and the user can retry in a moment.
-                dialogs.info(
-                    self,
-                    "Still finishing",
-                    "An operation is still finishing its current file and could not be stopped yet. "
-                    "Wait a moment, then close again.",
-                )
-                self.notify("Close cancelled: an operation is still finishing.")
-                return
-        if not self.ctx.watches.stop_all(timeout=3.0):
-            # A watcher worker is still alive. Destroying the window (and then
-            # closing SQLite) underneath it could let it move files or write
-            # history after resources are released, so stay open.
-            dialogs.info(
-                self,
-                "Still finishing",
-                "Folder monitoring is still finishing its current check. Wait a moment, then close again.",
-            )
-            self.notify("Close cancelled: folder monitoring is still finishing.")
+        if self._closing:
+            return
+        if self.runner.any_busy() and not dialogs.confirm(
+            self,
+            "Operation in progress",
+            "A scan or file operation is still running. The current file operation can finish, "
+            "but no new files will be started. Close and cancel?",
+        ):
+            return
+        self._closing = True
+        self.runner.request_shutdown()
+        self.ctx.watches.request_stop_all()
+        self._finish_close_when_idle()
+
+    def _finish_close_when_idle(self) -> None:
+        if self.runner.workers_active() or not self.ctx.watches.all_stopped():
+            self.notify("Closing when current operations finish…")
+            self.after(50, self._finish_close_when_idle)
             return
         logger.info("Application closing")
         self.destroy()

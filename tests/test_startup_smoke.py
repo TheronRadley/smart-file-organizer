@@ -50,7 +50,8 @@ def require_desktop() -> None:
 
 def test_window_opens_every_page_and_closes(tmp_path: Path) -> None:
     require_desktop()
-    pytest.importorskip("customtkinter")
+    if not REQUIRE_GUI:
+        pytest.importorskip("customtkinter")
     from smart_file_organizer.ui.app_window import NAV_ITEMS, App
 
     data_dir = tmp_path / "appdata"
@@ -89,7 +90,8 @@ def test_window_opens_every_page_and_closes(tmp_path: Path) -> None:
 def test_startup_survives_a_corrupt_settings_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A hand-edited settings file must not stop the application from starting."""
     require_desktop()
-    pytest.importorskip("customtkinter")
+    if not REQUIRE_GUI:
+        pytest.importorskip("customtkinter")
     from smart_file_organizer.ui.app_window import App
     from smart_file_organizer.utils.paths import DATA_DIR_ENV_VAR
 
@@ -119,3 +121,49 @@ def test_startup_survives_a_corrupt_settings_file(tmp_path: Path, monkeypatch: p
         if app is not None:
             app.on_close()
         database.close()
+
+
+def test_source_launcher_runs_the_desktop_round_trip(tmp_path: Path) -> None:
+    import subprocess
+
+    require_desktop()
+    if not REQUIRE_GUI:
+        pytest.importorskip("customtkinter")
+    launcher = Path(__file__).resolve().parents[1] / "app.py"
+    profile = tmp_path / "smoke-profile"
+    result = subprocess.run(
+        [sys.executable, str(launcher), "--smoke-test"],
+        cwd=tmp_path,
+        env={**os.environ, "SFO_DATA_DIR": str(profile)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=90,
+    )
+    log = profile / "app.log"
+    assert result.returncode == 0, result.stderr or (log.read_text(encoding="utf-8") if log.exists() else result.stdout)
+    assert (profile / "smoke-ok.txt").read_text(encoding="utf-8").strip() == "passed"
+
+
+def test_save_report_asks_about_the_chosen_file_before_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    require_desktop()
+    from smart_file_organizer.core.export import Export
+    from smart_file_organizer.ui.components import dialogs
+
+    target = tmp_path / "report.json"
+    target.write_text("old report", encoding="utf-8")
+    monkeypatch.setattr(dialogs, "choose_save_path", lambda *_args: str(target))
+    confirmations = []
+    answers = iter((False, True))
+
+    def confirm(_parent, _title, message):
+        confirmations.append(message)
+        return next(answers)
+
+    monkeypatch.setattr(dialogs, "confirm", confirm)
+    report = Export("test", (), (), {})
+    assert dialogs.save_report(None, "Report", "report.json", lambda: report) is None
+    assert target.read_text(encoding="utf-8") == "old report"
+    assert dialogs.save_report(None, "Report", "report.json", lambda: report) == target
+    assert len(confirmations) == 2 and all(str(target) in message for message in confirmations)
+    assert '"kind": "test"' in target.read_text(encoding="utf-8")

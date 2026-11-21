@@ -8,6 +8,7 @@ import pytest
 
 from smart_file_organizer.core.duplicates import find_duplicates
 from smart_file_organizer.core.export import (
+    Export,
     ExportError,
     duplicates_export,
     history_export,
@@ -157,8 +158,6 @@ def test_export_never_changes_history_or_files(
     ],
 )
 def test_csv_cells_starting_like_formulas_are_neutralized(tmp_path: Path, dangerous: str) -> None:
-    from smart_file_organizer.core.export import Export
-
     export = Export(kind="scan", columns=("name",), rows=({"name": dangerous},), summary={})
     target = write_export(export, tmp_path / "scan.csv")
 
@@ -169,8 +168,6 @@ def test_csv_cells_starting_like_formulas_are_neutralized(tmp_path: Path, danger
 
 @pytest.mark.parametrize("safe", ["normal.pdf", "a=b.pdf", "", "2026-01-01 notes.pdf"])
 def test_csv_cells_that_are_not_formulas_are_unchanged(tmp_path: Path, safe: str) -> None:
-    from smart_file_organizer.core.export import Export
-
     export = Export(kind="scan", columns=("name",), rows=({"name": safe},), summary={})
     target = write_export(export, tmp_path / "scan.csv")
     with open(target, encoding="utf-8-sig", newline="") as handle:
@@ -179,8 +176,6 @@ def test_csv_cells_that_are_not_formulas_are_unchanged(tmp_path: Path, safe: str
 
 
 def test_json_export_is_not_formula_sanitized(tmp_path: Path) -> None:
-    from smart_file_organizer.core.export import Export
-
     export = Export(kind="scan", columns=("name",), rows=({"name": "=1+1"},), summary={})
     target = write_export(export, tmp_path / "scan.json")
     assert json.loads(target.read_text(encoding="utf-8"))["rows"][0]["name"] == "=1+1"
@@ -224,48 +219,77 @@ def test_target_created_during_the_write_is_not_replaced(
     assert not list(tmp_path.glob("*.tmp")), "no temporary export file may be left behind"
 
 
-def test_partial_copy_during_publication_is_removed_and_reported(
-    tmp_path: Path, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_partial_report_is_not_published(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from smart_file_organizer.core import export as export_module
 
-    def fail_link(source, destination, *args, **kwargs):
-        raise OSError(18, "Invalid cross-device link")
-
-    def copy_halfway(source_handle, destination_handle, *args, **kwargs):
-        destination_handle.write(b"partial report")
+    def fail_write(export, stream):
+        stream.write("partial report")
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(export_module.os, "link", fail_link)
-    monkeypatch.setattr(export_module.shutil, "copyfileobj", copy_halfway)
-    target = tmp_path / "history.csv"
+    monkeypatch.setattr(export_module, "_write_json", fail_write)
+    target = tmp_path / "report.json"
     with pytest.raises(ExportError, match="Could not write"):
-        write_export(history_export(history), target)
-    assert not target.exists(), "an incomplete report must not be left at the target"
-    assert not list(tmp_path.glob("*.tmp")) and not list(tmp_path.glob(".*.tmp")), (
-        "no temporary or partial export file may be left behind"
-    )
+        write_export(Export("test", (), (), {}), target)
+    assert not target.exists() and not list(tmp_path.glob("*.tmp"))
 
 
-def test_export_cleanup_never_deletes_a_replacement_created_during_copying(
-    tmp_path: Path, history: HistoryRepository, monkeypatch: pytest.MonkeyPatch
+def test_failed_publication_does_not_clean_up_a_competing_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from smart_file_organizer.core import export as export_module
 
-    target = tmp_path / "history.csv"
-
-    def fail_link(source, destination, *args, **kwargs):
-        raise OSError(18, "Invalid cross-device link")
-
-    def copy_then_replaced(source_handle, destination_handle, *args, **kwargs):
-        destination_handle.write(b"partial")
-        destination_handle.close()
-        target.unlink()
-        target.write_bytes(b"unrelated replacement")
+    def fail_rename(source, destination):
+        destination.write_bytes(b"file from another program")
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(export_module.os, "link", fail_link)
-    monkeypatch.setattr(export_module.shutil, "copyfileobj", copy_then_replaced)
-    with pytest.raises(ExportError):
-        write_export(history_export(history), target)
-    assert target.read_bytes() == b"unrelated replacement", "cleanup must not delete another process's file"
+    monkeypatch.setattr(export_module, "rename_no_replace", fail_rename)
+    target = tmp_path / "report.json"
+    with pytest.raises(ExportError, match="Could not write"):
+        write_export(Export("test", (), (), {}), target)
+    assert target.read_bytes() == b"file from another program"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_cannot_replace_settings_with_a_report(isolated_data_dir: Path) -> None:
+    target = make_file(isolated_data_dir / "settings.json", b"original settings")
+    with pytest.raises(ExportError, match="data folder"):
+        write_export(Export("test", (), (), {}), target, overwrite=True)
+    assert target.read_bytes() == b"original settings"
+
+
+def test_overwrite_does_not_authorize_a_newly_appearing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from smart_file_organizer.core import export as export_module
+
+    target = tmp_path / "report.json"
+    report = Export("test", (), (), {})
+    write_json = export_module._write_json
+
+    def write_then_fill(export, temporary):
+        write_json(export, temporary)
+        target.write_text("new file from another process", encoding="utf-8")
+
+    monkeypatch.setattr(export_module, "_write_json", write_then_fill)
+    with pytest.raises(ExportError, match="already exists"):
+        write_export(report, target, overwrite=True)
+    assert target.read_text(encoding="utf-8") == "new file from another process"
+
+
+def test_replacement_is_tied_to_the_confirmed_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from smart_file_organizer.core import export as export_module
+
+    target = tmp_path / "report.json"
+    target.write_text("approved for replacement", encoding="utf-8")
+    consent = export_module.inspect_export_target(target)
+    assert consent is not None
+    report = Export("test", (), (), {})
+    write_json = export_module._write_json
+
+    def write_then_change(export, temporary):
+        write_json(export, temporary)
+        target.write_text("different contents", encoding="utf-8")
+
+    monkeypatch.setattr(export_module, "_write_json", write_then_change)
+    with pytest.raises(ExportError, match="changed while writing"):
+        write_export(report, target, replace_existing=consent)
+    assert target.read_text(encoding="utf-8") == "different contents"
+    assert list(tmp_path.glob("*.tmp")) == []

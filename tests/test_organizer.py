@@ -281,58 +281,15 @@ def test_hidden_files_are_not_moved_by_default(
     assert plan.operations == ()
 
 
-def test_move_no_overwrite_refuses_occupied_destination(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import errno
-
-    from smart_file_organizer.core import fileops
+def test_move_no_overwrite_refuses_occupied_destination(workspace: Path) -> None:
+    from smart_file_organizer.core.fileops import move_no_overwrite
 
     source = make_file(workspace / "source.txt", b"source-bytes")
     destination = make_file(workspace / "dest.txt", b"existing-bytes")
     with pytest.raises(FileExistsError):
-        fileops.move_no_overwrite(source, destination)
+        move_no_overwrite(source, destination)
     assert source.read_bytes() == b"source-bytes"
     assert destination.read_bytes() == b"existing-bytes"
-
-    def no_hard_links(src: Path, dst: Path) -> None:
-        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
-
-    monkeypatch.setattr(fileops.os, "link", no_hard_links)
-    with pytest.raises(FileExistsError):
-        fileops.move_no_overwrite(source, destination)
-    assert source.read_bytes() == b"source-bytes"
-    assert destination.read_bytes() == b"existing-bytes"
-
-
-def test_move_no_overwrite_fails_closed_on_posix_without_hard_links(
-    workspace: Path,
-    options: ScanOptions,
-    classifier: Classifier,
-    history: HistoryRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import errno
-
-    from smart_file_organizer.core import fileops
-
-    source = make_file(workspace / "report.pdf", b"important-data")
-    plan = _plan(workspace, options, classifier)
-
-    def no_hard_links(src: Path, dst: Path) -> None:
-        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
-
-    def forbidden_rename(src: Path, dst: Path) -> None:
-        raise AssertionError("os.rename must not be called as a POSIX fallback")
-
-    monkeypatch.setattr(fileops.os, "name", "posix")
-    monkeypatch.setattr(fileops.os, "link", no_hard_links)
-    monkeypatch.setattr(fileops.os, "rename", forbidden_rename)
-
-    outcome = execute_plan(plan, history=history)
-    assert outcome.success_count == 0
-    assert outcome.failed_count == 1
-    assert "hard links unavailable" in outcome.outcomes[0].reason
-    assert source.read_bytes() == b"important-data"
-    assert not (workspace / "Documents" / "report.pdf").exists()
 
 
 # ----- check/use races between the preview and the move --------------------
@@ -426,7 +383,7 @@ def test_source_swapped_while_the_destination_folder_is_created_is_refused(
     outcome = execute_plan(plan, history=history)
 
     assert outcome.success_count == 0
-    assert "after the preview" in outcome.outcomes[0].reason
+    assert "approved" in outcome.outcomes[0].reason or "after approval" in outcome.outcomes[0].reason
     assert source.read_bytes() == b"a longer replacement", "the replacement file must not have been moved"
     assert not (workspace / "Documents" / "report.pdf").exists()
 

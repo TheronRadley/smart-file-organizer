@@ -11,7 +11,7 @@ from smart_file_organizer.core.duplicates import (
     DuplicateReport,
     find_duplicates,
 )
-from smart_file_organizer.core.export import ExportError, duplicates_export, write_export
+from smart_file_organizer.core.export import duplicates_export
 from smart_file_organizer.core.models import ScanOptions
 from smart_file_organizer.ui import theme
 from smart_file_organizer.ui.components import dialogs
@@ -201,16 +201,11 @@ class DuplicatesPage(BasePage):
         if report is None:
             dialogs.info(self, "Nothing to export", "Run a duplicate search first.")
             return
-        path = dialogs.choose_save_path(self, "Export duplicate report", "duplicates.csv")
-        if not path:
-            return
-        try:
-            # The native save dialog has already confirmed replacing an existing file.
-            written = write_export(duplicates_export(report), path, overwrite=True)
-        except ExportError as exc:
-            dialogs.error(self, "Could not export", str(exc))
-            return
-        self.notify(f"Duplicate report exported to {written}")
+        written = dialogs.save_report(
+            self, "Export duplicate report", "duplicates.csv", lambda: duplicates_export(report)
+        )
+        if written is not None:
+            self.notify(f"Duplicate report exported to {written}")
 
     def _open_location(self) -> None:
         duplicate = self._selected_file()

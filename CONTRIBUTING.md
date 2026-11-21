@@ -12,10 +12,12 @@ Requires Python 3.12 or newer.
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt
 ```
 
 macOS/Linux: `python3.12 -m venv .venv && source .venv/bin/activate`, then the same `pip` command.
+For GUI work, check `python -m tkinter` in a desktop session; see the [README](README.md#quick-start)
+for Tcl/Tk installation hints. The core suite runs headless.
 
 ## Before you open a pull request
 
@@ -25,13 +27,16 @@ ruff check .
 python -m pytest
 ```
 
-CI runs the same commands on Windows and Linux, plus:
+CI runs the core checks on Windows, Linux, and macOS, plus:
 
 - a GUI startup smoke test on Windows (`tests/test_startup_smoke.py`, with `SFO_REQUIRE_GUI=1`
   so a missing desktop session fails instead of skipping);
-- `pip-audit` over the pinned dependencies;
-- the manual checks in [docs/WINDOWS_SAFETY_CHECKLIST.md](docs/WINDOWS_SAFETY_CHECKLIST.md)
-  before a release. These need a real Windows desktop and are not automated.
+- a Windows package build and packaged preview/apply/undo smoke test; run the same steps locally
+  with `python scripts/build_windows.py` and `python scripts/smoke_windows.py` on Windows;
+- `pip-audit` over the pinned dependencies.
+
+Before a release, run the remaining desktop and real-volume checks in the
+[Windows safety checklist](docs/WINDOWS_SAFETY_CHECKLIST.md).
 
 ## Guidelines
 

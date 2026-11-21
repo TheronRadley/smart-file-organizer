@@ -244,3 +244,88 @@ def test_second_instance_cannot_acquire_the_lock(tmp_path: Path) -> None:
     third = try_acquire_instance_lock(tmp_path)
     assert third is not None
     third.close()
+
+
+def test_legacy_history_migrates_without_inventing_directory_identity(tmp_path: Path) -> None:
+    from smart_file_organizer.database.migrations import MIGRATIONS
+
+    path = tmp_path / "v1.sqlite3"
+    original = sqlite3.connect(path)
+    try:
+        for statement in MIGRATIONS[0][1]:
+            original.execute(statement)
+        original.execute("PRAGMA user_version = 1")
+        original.execute(
+            "INSERT INTO batches (id,kind,root_name,root_path,status,created_at) VALUES (?,?,?,?,?,?)",
+            ("original", "organize", tmp_path.name, str(tmp_path), "completed", 1),
+        )
+        original.commit()
+    finally:
+        original.close()
+    database = Database(path)
+    try:
+        (batch,) = HistoryRepository(database).list_batches()
+        assert batch.id == "original"
+        assert batch.root_identity is None
+        assert database.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
+    finally:
+        database.close()
+
+
+def test_clear_holds_exclusion_through_the_delete_transaction(
+    workspace: Path, history: HistoryRepository, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from smart_file_organizer.core.operation_guard import operation_lock
+
+    transaction = database.transaction
+
+    @contextmanager
+    def check_guard():
+        with operation_lock(workspace) as acquired:
+            assert not acquired
+        with transaction() as connection:
+            yield connection
+
+    monkeypatch.setattr(database, "transaction", check_guard)
+    history.clear()
+    with operation_lock(workspace) as acquired:
+        assert acquired, "the clear guard must be released after commit"
+
+
+def test_second_process_never_opens_history(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from smart_file_organizer.core.instance import try_acquire_instance_lock
+
+    launcher = Path(__file__).resolve().parents[1] / "app.py"
+    lock = try_acquire_instance_lock(tmp_path)
+    assert lock is not None
+    with lock:
+        second = subprocess.run(
+            [sys.executable, str(launcher)],
+            env={**os.environ, "SFO_DATA_DIR": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert second.returncode == 1 and "could not lock" in second.stderr
+        assert not (tmp_path / "history.sqlite3").exists()
+        assert not (tmp_path / "app.log").exists()
+
+
+def test_nested_roots_are_mutually_exclusive_but_separate_roots_are_not(workspace: Path, tmp_path: Path) -> None:
+    from smart_file_organizer.core.operation_guard import operation_lock
+
+    child = workspace / "child"
+    child.mkdir()
+    sibling = tmp_path / "other"
+    sibling.mkdir()
+    for first, second in ((workspace, child), (child, workspace)):
+        with operation_lock(first) as acquired:
+            assert acquired
+            with operation_lock(second) as overlapping, operation_lock(sibling) as other:
+                assert not overlapping and other

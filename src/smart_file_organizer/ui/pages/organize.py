@@ -13,7 +13,7 @@ from smart_file_organizer.config import (
     ORGANIZE_BY_EXTENSION,
     ORGANIZE_BY_TYPE,
 )
-from smart_file_organizer.core.export import ExportError, scan_export, write_export
+from smart_file_organizer.core.export import scan_export
 from smart_file_organizer.core.metadata import read_metadata
 from smart_file_organizer.core.models import (
     STATUS_FAILED,
@@ -160,16 +160,9 @@ class OrganizePage(BasePage):
         if scan is None:
             dialogs.info(self, "Nothing to export", "Scan a folder first.")
             return
-        path = dialogs.choose_save_path(self, "Export scan results", "scan.csv")
-        if not path:
-            return
-        try:
-            # The native save dialog has already confirmed replacing an existing file.
-            written = write_export(scan_export(scan), path, overwrite=True)
-        except ExportError as exc:
-            dialogs.error(self, "Could not export", str(exc))
-            return
-        self.notify(f"Scan exported to {written}")
+        written = dialogs.save_report(self, "Export scan results", "scan.csv", lambda: scan_export(scan))
+        if written is not None:
+            self.notify(f"Scan exported to {written}")
 
     def _apply_filters(self) -> None:
         self._files.clear()
@@ -261,7 +254,7 @@ class OrganizePage(BasePage):
         self._mode = ctk.CTkOptionMenu(
             controls, values=list(MODE_LABELS), width=190, height=34, command=lambda _v: self._invalidate_preview()
         )
-        self._mode.set("By file type")
+        self._mode.set(next(label for label, value in MODE_LABELS.items() if value == self.ctx.settings.organize_by))
         self._mode.pack(side="left")
         self._collision = ctk.CTkOptionMenu(
             controls,
@@ -270,13 +263,18 @@ class OrganizePage(BasePage):
             height=34,
             command=lambda _v: self._invalidate_preview(),
         )
-        self._collision.set("Rename safely (name (2).ext)")
+        self._collision.set(
+            next(label for label, value in COLLISION_LABELS.items() if value == self.ctx.settings.collision_strategy)
+        )
         self._collision.pack(side="left", padx=8)
         button(controls, "Build preview", self._build_preview, primary=True, width=130).pack(side="left")
         button(controls, "Dry run", self._dry_run, width=110).pack(side="left", padx=8)
         button(controls, "Select all ready", self._select_all_ready, width=140).pack(side="left")
         self._apply_button = button(controls, "Apply selected…", self._apply, primary=True, width=160)
         self._apply_button.pack(side="right")
+        self._cancel_apply = button(tab, "Cancel apply", lambda: self.runner.cancel(APPLY_KEY), width=110)
+        self._cancel_apply.grid(row=1, column=0, sticky="e", padx=12, pady=(0, 4))
+        self._cancel_apply.configure(state="disabled")
 
         self._summary = muted_label(tab, "Build a preview from a scanned folder to see proposed moves.")
         self._summary.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 4))
@@ -382,7 +380,7 @@ class OrganizePage(BasePage):
     def _status_for(operation: PlannedOperation, result: Any) -> tuple[str, str]:
         if result is not None:
             if result.status == STATUS_SUCCESS:
-                return "Moved", "ok"
+                return ("Moved; check Recovery guidance", "bad") if not result.history_recorded else ("Moved", "ok")
             if result.status == STATUS_WOULD_MOVE:
                 return "Would move (dry run)", "ok"
             if result.status == STATUS_FAILED:
@@ -432,7 +430,7 @@ class OrganizePage(BasePage):
             self,
             "Apply organization",
             f"Move {len(selected):,} file(s) ({size}) into their folders under\n{plan.root}?\n\n"
-            "Each move is recorded in History and can be undone when it is still safe to do so.",
+            "Check History for recorded moves, undo and recovery.",
         ):
             return
         indices = [op.index for op in selected]
@@ -449,7 +447,9 @@ class OrganizePage(BasePage):
 
         def success(outcome: BatchOutcome) -> None:
             self._set_busy(False)
-            if outcome.cancelled:
+            if outcome.needs_recovery:
+                prefix = "Batch needs recovery"
+            elif outcome.cancelled:
                 prefix = "Batch cancelled"
             elif outcome.failed_count:
                 prefix = "Batch partially applied"
@@ -460,7 +460,7 @@ class OrganizePage(BasePage):
                 f"{outcome.skipped_count} skipped, {outcome.failed_count} failed."
             )
             self._show_outcome(plan, outcome, headline)
-            if outcome.cancelled or outcome.failed_count:
+            if outcome.needs_recovery or outcome.cancelled or outcome.failed_count:
                 self._banner.show(headline, color=theme.WARNING)
             self.ctx.last_plan = None
             if outcome.success_count and self.ctx.last_scan is not None:
@@ -476,6 +476,7 @@ class OrganizePage(BasePage):
 
     def _set_busy(self, busy: bool) -> None:
         self._apply_button.configure(state="disabled" if busy else "normal")
+        self._cancel_apply.configure(state="normal" if busy else "disabled")
 
     def _show_outcome(self, plan: OrganizePlan, outcome: BatchOutcome, headline: str) -> None:
         self._render_plan(plan, outcome)
@@ -483,7 +484,7 @@ class OrganizePage(BasePage):
         if outcome.batch_id:
             lines.append(f"Batch ID: {outcome.batch_id} (see History to review or undo)")
         for item in outcome.outcomes:
-            if item.status in (STATUS_FAILED, STATUS_SKIPPED):
+            if item.status in (STATUS_FAILED, STATUS_SKIPPED) or not item.history_recorded:
                 lines.append(f"  {item.status.upper()}: {item.source} - {item.reason}")
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")

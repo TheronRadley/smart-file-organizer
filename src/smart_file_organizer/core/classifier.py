@@ -70,6 +70,10 @@ class Classifier:
             folder_overrides=settings.category_folders,
         )
 
+    def has_same_rules(self, other: Classifier) -> bool:
+        """Compare the effective extension and destination rules of two snapshots."""
+        return self._extension_to_category == other._extension_to_category and self._folders == other._folders
+
     @property
     def category_names(self) -> list[str]:
         return list(self._categories)

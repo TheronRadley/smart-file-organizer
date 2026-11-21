@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from smart_file_organizer.core.export import ExportError, history_export, write_export
+from smart_file_organizer.core.export import history_export
 from smart_file_organizer.core.models import (
     OP_CREATE_FOLDER,
     BatchRecord,
     OperationRecord,
 )
-from smart_file_organizer.core.recovery import UNFINISHED_BATCH_STATUSES, RecoveryError, recovery_steps
+from smart_file_organizer.core.recovery import (
+    UNFINISHED_BATCH_STATUSES,
+    RecoveryError,
+    recovery_steps,
+    unfinished_batches,
+)
 from smart_file_organizer.core.undo import (
     UndoError,
     UndoPreview,
@@ -30,8 +35,8 @@ UNDO_KEY = "undo"
 class HistoryPage(BasePage):
     title = "History"
     description = (
-        "Every organization batch is recorded with its original and new location. Undo reverses a batch only when "
-        "every file is still where it was left; otherwise nothing is changed and the reasons are shown."
+        "Review the paths and outcomes recorded for each batch. Undo checks the remaining recorded moves before "
+        "restoring them. Use Recovery guidance when an outcome is missing or uncertain."
     )
 
     def build(self, body: ctk.CTkFrame) -> None:
@@ -94,20 +99,24 @@ class HistoryPage(BasePage):
     def refresh(self) -> None:
         self._batches.clear()
         self._operations.clear()
-        for batch in self.ctx.history.list_batches():
+        history = self.ctx.history
+        recent = history.list_batches()
+        recent_ids = {batch.id for batch in recent}
+        # Keep older unresolved work accessible even after the recent page fills up.
+        older = [batch for batch in unfinished_batches(history) if batch.id not in recent_ids and batch.needs_recovery]
+        for batch in (*recent, *older):
             self._batches.insert(
                 [
                     format_timestamp(batch.created_at),
                     "Preview" if batch.dry_run else batch.kind.title(),
                     batch.root_name,
-                    batch.status.replace("_", " ").title(),
+                    "Needs recovery" if batch.needs_recovery else batch.status.replace("_", " ").title(),
                     str(batch.operation_count),
                     batch.note or "",
                 ],
                 batch,
             )
-        count = len(self.ctx.history.list_batches())
-        self._note.configure(text=f"{count:,} batch(es) recorded")
+        self._note.configure(text=f"{len(recent) + len(older):,} of {history.count_batches():,} batches shown")
 
     def _selected_batch(self) -> BatchRecord | None:
         batch = self._batches.selected_payload()
@@ -121,13 +130,16 @@ class HistoryPage(BasePage):
         self._banner.hide()
         if batch is None:
             return
+        current_batch = self.ctx.history.get_batch(batch.id)
+        if current_batch is None:
+            return
         for operation in self.ctx.history.list_operations(batch.id):
             self._operations.insert(
                 _operation_row(operation),
                 operation,
                 tags=("bad",) if operation.status in ("failed", "interrupted") else (),
             )
-        if batch.status in UNFINISHED_BATCH_STATUSES:
+        if current_batch.needs_recovery or current_batch.status in UNFINISHED_BATCH_STATUSES:
             # An unfinished batch is exactly when the user needs to know what to do next.
             self._recovery(silent_when_clean=True)
 
@@ -144,15 +156,21 @@ class HistoryPage(BasePage):
             self._show_blocked(preview)
             return
         extra = (
-            " Empty folders created by this batch will be removed."
+            " Empty folders will be removed only if their recorded identities still match."
             if any(op.op_type == OP_CREATE_FOLDER for op in self.ctx.history.list_operations(batch.id))
+            else ""
+        )
+        warning = (
+            "\n\nThis batch also needs Recovery guidance. Undo does not reverse an unrecorded move."
+            if preview.batch.needs_recovery
             else ""
         )
         if not dialogs.confirm(
             self,
             "Undo batch",
             f"Move {len(preview.items)} file(s) back to their original locations?{extra}\n\n"
-            "This is only done if every file is still exactly where it was organized.",
+            "Undo checks all recorded files before starting. If something changes during Undo, it may finish partly."
+            f"{warning}",
         ):
             return
 
@@ -174,7 +192,10 @@ class HistoryPage(BasePage):
         more = len(preview.blocked) - len(reasons)
         if more > 0:
             reasons.append(f"…and {more} more.")
-        message = "\n".join(reasons) or "Nothing is left to undo."
+        message = "\n".join(reasons) or " ".join(preview.notes) or "Nothing is left to undo."
+        if not preview.blocked:
+            self._banner.show(message, color=theme.WARNING)
+            return
         self._banner.show(
             f"Undo refused: {len(preview.blocked)} file(s) cannot be restored safely. "
             f"No files were changed.\n{message}",
@@ -206,16 +227,9 @@ class HistoryPage(BasePage):
         if not self.ctx.history.list_batches(limit=1):
             dialogs.info(self, "Nothing to export", "History is empty.")
             return
-        path = dialogs.choose_save_path(self, "Export history", "history.csv")
-        if not path:
-            return
-        try:
-            # The native save dialog has already confirmed replacing an existing file.
-            written = write_export(history_export(self.ctx.history), path, overwrite=True)
-        except ExportError as exc:
-            dialogs.error(self, "Could not export", str(exc))
-            return
-        self.notify(f"History exported to {written}")
+        written = dialogs.save_report(self, "Export history", "history.csv", lambda: history_export(self.ctx.history))
+        if written is not None:
+            self.notify(f"History exported to {written}")
 
     def _clear(self) -> None:
         if not dialogs.confirm(

@@ -48,7 +48,7 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._local = threading.local()
-        self._connections: list[sqlite3.Connection] = []
+        self._connections: set[sqlite3.Connection] = set()
         self._registry_lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -68,16 +68,17 @@ class Database:
                 isolation_level=None,  # explicit transaction control below
                 check_same_thread=False,
             )
-            with self._registry_lock:
-                self._connections.append(connection)
-            self._local.connection = connection
             try:
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.execute("PRAGMA journal_mode = WAL")
             except BaseException:
-                self.close()
+                with suppress(sqlite3.Error):
+                    connection.close()
                 raise
+            with self._registry_lock:
+                self._connections.add(connection)
+            self._local.connection = connection
         return connection
 
     @contextmanager
@@ -87,10 +88,12 @@ class Database:
         connection.execute("BEGIN IMMEDIATE")
         try:
             yield connection
+            connection.execute("COMMIT")
         except BaseException:
-            connection.execute("ROLLBACK")
+            if connection.in_transaction:
+                with suppress(sqlite3.Error):
+                    connection.execute("ROLLBACK")
             raise
-        connection.execute("COMMIT")
 
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         """Run a read-only statement and return all rows."""
@@ -105,6 +108,18 @@ class Database:
         except sqlite3.DatabaseError:
             return False
         return len(rows) == 1 and rows[0][0] == "ok"
+
+    def close_thread_connection(self) -> None:
+        """Release the calling worker's connection without affecting other threads."""
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            return
+        del self._local.connection
+        with self._registry_lock:
+            if connection not in self._connections:
+                return  # Already claimed by close().
+            self._connections.remove(connection)
+        connection.close()
 
     def close(self) -> None:
         """Close every connection opened by this instance."""
